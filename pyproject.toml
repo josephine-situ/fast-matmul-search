@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fast-matmul-search"
+version = "0.1.0"
+description = "Research scaffold for fast matrix multiplication search"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "torch>=2.0",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+py-modules = [
+    "tensor_utils",
+    "continuous_search",
+    "finite_field_search",
+    "numerical_stability",
+    "omega_analysis",
+    "pipeline",
+    "run_experiments",
+    "validation",
+]
