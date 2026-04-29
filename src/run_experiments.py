@@ -85,7 +85,7 @@ def batch_run(config: Dict = None):
             'als_steps': 3000,
             'ff_attempts': 1000000,
             'primes': [2, 3, 5],
-            'device': 'cpu',
+            'device': 'cuda' if __import__('torch').cuda.is_available() else 'cpu',
             'output_dir': 'batch_results',
         }
     

@@ -1,6 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=fast-matmul-full
-#SBATCH --partition=mit_normal
+#SBATCH --partition=mit_normal_gpu
+#SBATCH --gres=gpu:1
 #SBATCH --time=12:00:00
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=16
