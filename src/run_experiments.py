@@ -41,14 +41,14 @@ def run_single_experiment(m: int, p: int, n: int, target_rank: int,
         pass
     
     # Method 2: ALS
-    als = ALSSearch(m, p, n)
-    als_results = als.search(
-        R=target_rank,
-        n_restarts=config['als_restarts'],
-        n_steps=config['als_steps'],
-        verbose=False
-    )
-    all_results.extend(als_results)
+    # als = ALSSearch(m, p, n)
+    # als_results = als.search(
+    #     R=target_rank,
+    #     n_restarts=config['als_restarts'],
+    #     n_steps=config['als_steps'],
+    #     verbose=False
+    # )
+    # all_results.extend(als_results)
     
     # Method 3: Finite field (only for small cases)
     tensor_entries = (m * p) * (p * n) * (m * n)
@@ -94,7 +94,18 @@ def batch_run(config: Dict = None):
     # Get prioritized experiments
     experiments = select_experiments(max_tensor_entries=5000, n_targets=8)
     
+    log_file = os.path.join(config['output_dir'], 'experiment_log.json')
     log = []
+    completed_cases = set()
+    if os.path.exists(log_file):
+        try:
+            with open(log_file, 'r') as f:
+                log = json.load(f)
+            for e in log:
+                completed_cases.add((tuple(e['case']), e['target_rank']))
+        except Exception as e:
+            print(f"Warning: could not load existing log: {e}")
+
     total_start = time.time()
     
     print(f"Starting batch run: {len(experiments)} experiments")
@@ -105,6 +116,10 @@ def batch_run(config: Dict = None):
         m, p, n = exp['case']
         target_rank = exp['target_rank']
         purpose = exp['purpose']
+        
+        if ((m, p, n), target_rank) in completed_cases:
+            print(f"[{i+1}/{len(experiments)}] <{m},{p},{n}> rank {target_rank} ({purpose}) - SKIPPING (already ran)")
+            continue
         
         print(f"[{i+1}/{len(experiments)}] <{m},{p},{n}> rank {target_rank} ({purpose})")
         
