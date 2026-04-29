@@ -10,6 +10,14 @@ from tensor_utils import KNOWN_RANKS, compute_omega_single, get_sorted_targets
 import numpy as np
 
 
+def _target_score(target):
+    """Composite score used to prioritize promising targets."""
+    tractability = 1.0 / np.log(target['tensor_entries'] + 1)
+    impact = target['marginal_omega']
+    opportunity = 2.0 if target['limited_prior_work'] else 1.0
+    return tractability * impact * opportunity
+
+
 def analyze_targets():
     """Print a ranked analysis of all target cases."""
     
@@ -20,17 +28,10 @@ def analyze_targets():
     print("=" * 100)
     print()
     
-    # Sort by a composite score: prioritize limited prior work,
-    # smaller tensors, and larger marginal omega improvement
     for t in targets:
-        # Score combines: tractability (smaller tensor), 
-        # impact (marginal omega), and opportunity (limited prior work)
-        tractability = 1.0 / np.log(t['tensor_entries'] + 1)
-        impact = t['marginal_omega']
-        opportunity = 2.0 if t['limited_prior_work'] else 1.0
-        t['score'] = tractability * impact * opportunity
+        t['score'] = _target_score(t)
     
-    targets.sort(key=lambda t: t['score'], reverse=True)
+    targets.sort(key=_target_score, reverse=True)
     
     print(f"{'Case':<12} {'mpn':>4} {'Tensor':>14} {'Best R':>6} "
           f"{'Std R':>5} {'Saved':>6} {'ω now':>7} {'ω if R-1':>8} "
@@ -94,7 +95,7 @@ def select_experiments(max_tensor_entries=5000, n_targets=10):
             'case': (m, p, n),
             'target_rank': R,
             'purpose': 'validate',
-            'priority': t['score'],
+            'priority': _target_score(t),
         })
         
         # Second: try to beat it (research)
@@ -102,7 +103,7 @@ def select_experiments(max_tensor_entries=5000, n_targets=10):
             'case': (m, p, n),
             'target_rank': R - 1,
             'purpose': 'improve',
-            'priority': t['score'] * 2,  # higher priority
+            'priority': _target_score(t) * 2,
         })
     
     # Sort by priority
