@@ -11,6 +11,7 @@ Strategy:
   3. Lifting uses: direct sign adjustment, then gradient refinement
 """
 
+import math
 import numpy as np
 from typing import List, Optional, Tuple, Dict
 from tensor_utils import (build_mult_tensor, verify_decomposition,
@@ -42,8 +43,9 @@ def search_gf(m: int, p_dim: int, n: int, target_rank: int,
     if verbose:
         print(f"\nGF({prime}) random search for <{m},{p_dim},{n}> rank {R}")
         print(f"  Tensor shape: ({d1}, {d2}, {d3})")
-        search_space = prime ** (R * (d1 + d2 + d3))
-        print(f"  Search space size: {prime}^{R*(d1+d2+d3)} ≈ 10^{np.log10(search_space):.0f}")
+        exponent = R * (d1 + d2 + d3)
+        approx_log10 = exponent * math.log10(prime)
+        print(f"  Search space size: {prime}^{exponent} ≈ 10^{approx_log10:.0f}")
         print(f"  Attempts: {n_attempts}")
     
     for attempt in range(n_attempts):
