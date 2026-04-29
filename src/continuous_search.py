@@ -69,7 +69,7 @@ class ContinuousSearch:
                     nnz = np.random.randint(1, min(4, d + 1))
                     idx = np.random.choice(d, nnz, replace=False)
                     vals = np.random.choice([-1.0, 1.0], nnz)
-                    M[idx, r] = torch.tensor(vals, dtype=torch.float64)
+                    M[idx, r] = torch.tensor(vals, dtype=torch.float64, device=self.device)
             
             # Add small noise to break symmetry
             U += torch.randn_like(U) * 0.1
