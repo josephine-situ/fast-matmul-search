@@ -6,7 +6,7 @@ Reducing rank by 1 for a case with large marginal ω impact is worth
 more than reducing rank by 1 for a case with small marginal impact.
 """
 
-from tensor_utils import KNOWN_RANKS, compute_omega_single, get_sorted_targets
+from tensor_utils import KNOWN_RANKS, compute_omega_single, get_sorted_targets, get_lower_bound
 import numpy as np
 
 
@@ -90,21 +90,26 @@ def select_experiments(max_tensor_entries=5000, n_targets=10):
         m, p, n = t['case']
         R = t['best_rank']
         
+        # Don't try to beat mathematically proven lower bounds
+        lb_arbitrary = get_lower_bound(m, p, n, field="arbitrary")
+
         # First: try to match known best (validation)
-        experiments.append({
-            'case': (m, p, n),
-            'target_rank': R,
-            'purpose': 'validate',
-            'priority': _target_score(t),
-        })
-        
+        if R >= lb_arbitrary:
+            experiments.append({
+                'case': (m, p, n),
+                'target_rank': R,
+                'purpose': 'validate',
+                'priority': _target_score(t),
+            })
+            
         # Second: try to beat it (research)
-        experiments.append({
-            'case': (m, p, n),
-            'target_rank': R - 1,
-            'purpose': 'improve',
-            'priority': _target_score(t) * 2,
-        })
+        if (R - 1) >= lb_arbitrary:
+            experiments.append({
+                'case': (m, p, n),
+                'target_rank': R - 1,
+                'purpose': 'improve',
+                'priority': _target_score(t) * 2,
+            })
     
     # Sort by priority
     experiments.sort(key=lambda e: e['priority'], reverse=True)

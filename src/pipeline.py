@@ -15,7 +15,8 @@ from typing import List, Dict
 import numpy as np
 
 from tensor_utils import (DecompositionResult, KNOWN_RANKS, 
-                           build_mult_tensor, verify_decomposition)
+                           build_mult_tensor, verify_decomposition,
+                           get_lower_bound)
 from omega_analysis import analyze_targets, select_experiments
 from continuous_search import ContinuousSearch, ALSSearch
 from finite_field_search import search_all_fields
@@ -34,6 +35,11 @@ def run_search_for_case(m: int, p: int, n: int, target_rank: int,
     print(f"# Standard rank: {m*p*n}, "
           f"known best: {KNOWN_RANKS.get((m,p,n), (m*p*n, 'unknown'))[0]}")
     print(f"{'#'*70}")
+    
+    lb_arbitrary = get_lower_bound(m, p, n, field="arbitrary")
+    if target_rank < lb_arbitrary:
+        print(f"Skipping pursuit of rank {target_rank} because it is below the known mathematically proven lower bound of {lb_arbitrary}.")
+        return all_results
     
     # ---- Method 1: Continuous optimization (gradient descent) ----
     print(f"\n--- Method 1: Gradient descent ---")
@@ -77,13 +83,20 @@ def run_search_for_case(m: int, p: int, n: int, target_rank: int,
     # Only feasible for smallish tensors
     tensor_size = (m * p) * (p * n) * (m * n)
     if tensor_size <= 2000:
-        ff_results = search_all_fields(
-            m, p, n, target_rank,
-            primes=config.get('primes', [2, 3, 5]),
-            n_attempts_per_prime=config.get('ff_attempts', 1000000),
-            verbose=True
-        )
-        all_results.extend(ff_results)
+        ff_primes = config.get('primes', [2, 3, 5])
+        for prime in ff_primes:
+            lb_ff = get_lower_bound(m, p, n, field=f"GF{prime}")
+            if target_rank < lb_ff:
+                print(f"  Skipping exhaustive search for prime {prime} (target {target_rank} < lower bound {lb_ff})")
+                continue
+                
+            ff_results = search_all_fields(
+                m, p, n, target_rank,
+                primes=[prime],
+                n_attempts_per_prime=config.get('ff_attempts', 1000000),
+                verbose=True
+            )
+            all_results.extend(ff_results)
     else:
         print(f"  Tensor too large ({tensor_size} entries) for "
               f"exhaustive finite field search")
@@ -91,6 +104,11 @@ def run_search_for_case(m: int, p: int, n: int, target_rank: int,
         
         from finite_field_search import search_gf_structured, lift_to_integers
         for prime in config.get('primes', [2, 3, 5]):
+            lb_ff = get_lower_bound(m, p, n, field=f"GF{prime}")
+            if target_rank < lb_ff:
+                print(f"  Skipping structured search for prime {prime} (target {target_rank} < lower bound {lb_ff})")
+                continue
+                
             solutions = search_gf_structured(
                 m, p, n, target_rank, prime,
                 n_attempts=config.get('ff_attempts', 500000) // 2,
