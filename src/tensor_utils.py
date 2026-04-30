@@ -224,51 +224,54 @@ KNOWN_RANKS: Dict[Tuple[int, int, int], Tuple[int, str]] = {
     (2, 2, 3): (11, "Hopcroft-Kerr 1971"),
     
     # mpn = 16
-    (2, 2, 4): (14, "Hopcroft-Kerr 1971 / 2x Strassen"),  
+    (2, 2, 4): (14, "AlphaTensor 2022 / Hopcroft-Kerr"),  
     (2, 4, 2): (14, "symmetry of above"),
     
     # mpn = 18
-    (2, 3, 3): (15, "Smirnov / Pan"),
+    (2, 3, 3): (15, "Smirnov / AlphaTensor 2022"),
     
     # mpn = 20
-    (2, 2, 5): (18, "various"),
+    (2, 2, 5): (18, "AlphaTensor 2022"),
     
     # mpn = 24
-    (2, 3, 4): (26, "Smirnov"),
-    (2, 2, 6): (21, "3x Strassen"),
+    (2, 3, 4): (20, "AlphaTensor 2022"),
+    (2, 2, 6): (21, "recursive (3 * (2,2,2)=7)"),
     
     # mpn = 27
-    (3, 3, 3): (23, "Makarov-Smirnov / AlphaTensor"),
+    (3, 3, 3): (23, "Laderman 1976 Standard; AlphaTensor got 23 over GF(2)"),
     
     # mpn = 30
-    (2, 3, 5): (30, "Smirnov — possibly improvable"),
+    (2, 3, 5): (25, "AlphaTensor 2022"),
     
     # mpn = 32
-    (2, 4, 4): (36, "Smirnov — needs verification"),
-    (2, 2, 8): (28, "4x Strassen"),
+    (2, 4, 4): (26, "AlphaTensor 2022"),
+    (2, 2, 8): (28, "recursive 4x Strassen"),
     
     # mpn = 36
     (3, 3, 4): (29, "AlphaTensor 2022"),
-    (2, 3, 6): (33, "Smirnov"),
+    (2, 3, 6): (30, "recursive 2x (2,3,3)"),
     
     # mpn = 40  
-    (2, 4, 5): (36, "Smirnov — limited prior work"),
-    (2, 2, 10): (35, "Strassen recursive"),
+    (2, 4, 5): (33, "AlphaTensor 2022"),
+    (2, 2, 10): (35, "recursive"),
     
     # mpn = 45
-    (3, 3, 5): (38, "limited prior work"),
+    (3, 3, 5): (36, "AlphaTensor 2022"),
     
     # mpn = 48
-    (3, 4, 4): (38, "limited prior work"),
-    (2, 4, 6): (40, "Smirnov"),
+    (3, 4, 4): (38, "AlphaTensor 2022"),
+    (2, 4, 6): (40, "recursive 2x (2,3,4)"),
+    
+    # mpn = 50
+    (2, 5, 5): (40, "AlphaTensor 2022"),
     
     # mpn = 54
-    (3, 3, 6): (40, "Smirnov"),
+    (3, 3, 6): (45, "recursive"),
     
     # mpn = 60
-    (3, 4, 5): (47, "limited prior work"),
-    (2, 5, 6): (47, "limited prior work"),
-    (2, 3, 10): (52, "limited prior work"),
+    (3, 4, 5): (47, "AlphaTensor 2022"),
+    (2, 5, 6): (45, "recursive"),
+    (2, 3, 10): (50, "recursive"),
     
     # mpn = 64
     (4, 4, 4): (49, "Strassen recursive; AlphaTensor got 47 over GF(2)"),
@@ -277,10 +280,16 @@ KNOWN_RANKS: Dict[Tuple[int, int, int], Tuple[int, str]] = {
     (3, 4, 6): (54, "limited prior work"),
     
     # mpn = 75
-    (3, 5, 5): (55, "limited prior work"),
+    (3, 5, 5): (58, "AlphaTensor 2022"),
     
     # mpn = 80
-    (4, 4, 5): (58, "limited prior work"),
+    (4, 4, 5): (63, "AlphaTensor 2022 Standard; 62 over GF(2)"),
+    
+    # mpn = 100
+    (4, 5, 5): (76, "AlphaTensor 2022"),
+    
+    # mpn = 125
+    (5, 5, 5): (98, "AlphaTensor 2022 Standard; 96 over GF(2)"),
 }
 
 
