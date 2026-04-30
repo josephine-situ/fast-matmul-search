@@ -218,7 +218,7 @@ class ContinuousSearch:
         phase1_end = int(n_steps * 0.4)
         phase2_end = int(n_steps * 0.7)
         
-        best_rounded_error = torch.full((B,), float('inf'), device=self.device)
+        best_rounded_error = torch.full((B,), float('inf'), device=self.device, dtype=torch.float64)
         best_U = U.detach().clone()
         best_V = V.detach().clone()
         best_W = W.detach().clone()
