@@ -90,6 +90,45 @@ class ContinuousSearch:
         W.requires_grad_(True)
         return U, V, W
     
+    def _reconstruct_batched(self, U, V, W):
+        """T_approx[b,i,j,k] = Σ_r U[b,i,r] V[b,j,r] W[b,k,r]"""
+        return torch.einsum('bir,bjr,bkr->bijk', U, V, W)
+    
+    def _recon_loss_batched(self, U, V, W):
+        """Squared Frobenius norm of residual per batch element."""
+        residual = self.T.unsqueeze(0) - self._reconstruct_batched(U, V, W)
+        return (residual ** 2).flatten(start_dim=1).sum(dim=1)
+    
+    def _integrality_loss_batched(self, U, V, W):
+        loss = 0.0
+        for M in [U, V, W]:
+            loss = loss + (torch.sin(np.pi * M) ** 2).flatten(start_dim=1).sum(dim=1)
+        return loss
+
+    def _sparsity_loss_batched(self, U, V, W):
+        eps = 1e-4
+        loss = 0.0
+        for M in [U, V, W]:
+            loss = loss + (torch.sqrt(M ** 2 + eps ** 2) - eps).flatten(start_dim=1).sum(dim=1)
+        return loss
+
+    def _magnitude_loss_batched(self, U, V, W):
+        loss = 0.0
+        for M in [U, V, W]:
+            loss = loss + (F.relu(M.abs() - 2.0) ** 2).flatten(start_dim=1).sum(dim=1)
+        return loss
+
+    def _balance_loss_batched(self, U, V, W):
+        normU = (U ** 2).sum(dim=1)  # (B, R)
+        normV = (V ** 2).sum(dim=1)
+        normW = (W ** 2).sum(dim=1)
+        gmean = (normU * normV * normW).clamp(min=1e-8) ** (1.0 / 3.0)
+        
+        loss = ((normU / gmean - 1) ** 2).sum(dim=1) + \
+               ((normV / gmean - 1) ** 2).sum(dim=1) + \
+               ((normW / gmean - 1) ** 2).sum(dim=1)
+        return loss
+
     def _reconstruct(self, U, V, W):
         """T_approx[i,j,k] = Σ_r U[i,r] V[j,r] W[k,r]"""
         return torch.einsum('ir,jr,kr->ijk', U, V, W)
@@ -149,6 +188,122 @@ class ContinuousSearch:
                ((nw / gmean - 1) ** 2).sum()
         return loss
     
+    def search_batched(self, R: int, B: int, n_steps: int = 20000,
+                       lr: float = 0.003, verbose: bool = False) -> List[DecompositionResult]:
+        """
+        Batched optimization run solving B restarts simultaneously.
+        Dramatically reduces overhead.
+        """
+        # We manually initialize batch. We can vary initialization method per batch element.
+        U = torch.zeros(B, self.d1, R, dtype=torch.float64, device=self.device)
+        V = torch.zeros(B, self.d2, R, dtype=torch.float64, device=self.device)
+        W = torch.zeros(B, self.d3, R, dtype=torch.float64, device=self.device)
+        methods = ['gaussian', 'sparse', 'uniform']
+        
+        for b in range(B):
+            u_b, v_b, w_b = self._init_factors(R, method=methods[b % len(methods)])
+            U[b] = u_b.detach()
+            V[b] = v_b.detach()
+            W[b] = w_b.detach()
+        
+        U.requires_grad_(True)
+        V.requires_grad_(True)
+        W.requires_grad_(True)
+
+        optimizer = torch.optim.Adam([U, V, W], lr=lr)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            optimizer, T_0=n_steps // 4, T_mult=1, eta_min=lr * 0.01
+        )
+        
+        phase1_end = int(n_steps * 0.4)
+        phase2_end = int(n_steps * 0.7)
+        
+        best_rounded_error = torch.full((B,), float('inf'), device=self.device)
+        best_U = U.detach().clone()
+        best_V = V.detach().clone()
+        best_W = W.detach().clone()
+        
+        exact_masks = torch.zeros(B, dtype=torch.bool, device=self.device)
+        results = []
+        
+        for step in range(n_steps):
+            if exact_masks.all():
+                break # All found
+            
+            optimizer.zero_grad()
+            
+            recon = self._recon_loss_batched(U, V, W)
+            loss_batch = recon.clone()
+            
+            if step < phase1_end:
+                loss_batch += 0.01 * self._balance_loss_batched(U, V, W)
+            elif step < phase2_end:
+                t = (step - phase1_end) / (phase2_end - phase1_end)
+                int_w = 0.3 * t ** 2
+                sparse_w = 0.05 * t
+                mag_w = 0.1 * t
+                loss_batch += (int_w * self._integrality_loss_batched(U, V, W) +
+                               sparse_w * self._sparsity_loss_batched(U, V, W) +
+                               mag_w * self._magnitude_loss_batched(U, V, W) +
+                               0.01 * self._balance_loss_batched(U, V, W))
+            else:
+                t = (step - phase2_end) / (n_steps - phase2_end)
+                int_w = 0.3 + 2.0 * t
+                sparse_w = 0.05 + 0.2 * t
+                mag_w = 0.1 + 0.5 * t
+                loss_batch += (int_w * self._integrality_loss_batched(U, V, W) +
+                               sparse_w * self._sparsity_loss_batched(U, V, W) +
+                               mag_w * self._magnitude_loss_batched(U, V, W))
+            
+            # Mask out already converged gradients
+            loss = (loss_batch * (~exact_masks)).sum()
+            if loss > 0:
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_([U, V, W], max_norm=5.0)
+                optimizer.step()
+                scheduler.step()
+            
+            if step % 1000 == 0 or step == n_steps - 1:
+                with torch.no_grad():
+                    U_r = torch.round(U)
+                    V_r = torch.round(V)
+                    W_r = torch.round(W)
+                    rounded_errs = self._recon_loss_batched(U_r, V_r, W_r)
+                    
+                    improved = rounded_errs < best_rounded_error
+                    if improved.any():
+                        best_rounded_error[improved] = rounded_errs[improved]
+                        best_U[improved] = U_r[improved].detach()
+                        best_V[improved] = V_r[improved].detach()
+                        best_W[improved] = W_r[improved].detach()
+                    
+                    newly_exact = (best_rounded_error < 1e-10) & (~exact_masks)
+                    if newly_exact.any():
+                        idx = newly_exact.nonzero(as_tuple=True)[0]
+                        for i in idx.tolist():
+                            if verbose:
+                                print(f"  EXACT in batch element {i} at step {step}!")
+                            results.append(make_result(best_U[i].cpu().numpy(), 
+                                                       best_V[i].cpu().numpy(), 
+                                                       best_W[i].cpu().numpy(),
+                                                       self.m, self.p, self.n,
+                                                       'gradient', 'Z'))
+                        exact_masks |= newly_exact
+                        
+        # Now try to snap and refine those that are close but not exact
+        not_exact = (~exact_masks).nonzero(as_tuple=True)[0].tolist()
+        for b in not_exact:
+            result = self._snap_and_refine(U[b].detach(), V[b].detach(), W[b].detach())
+            if result is not None:
+                results.append(result)
+            elif best_rounded_error[b] < 1e-10:
+                results.append(make_result(best_U[b].cpu().numpy(), 
+                                           best_V[b].cpu().numpy(), 
+                                           best_W[b].cpu().numpy(),
+                                           self.m, self.p, self.n,
+                                           'gradient', 'Z'))
+        return results
+
     def search_single(self, R: int, n_steps: int = 20000,
                        lr: float = 0.003, init_method: str = 'gaussian',
                        verbose: bool = False) -> Optional[DecompositionResult]:
@@ -347,49 +502,49 @@ class ContinuousSearch:
                lr: float = 0.003, verbose: bool = True
                ) -> List[DecompositionResult]:
         """
-        Main search: many random restarts with different initializations.
+        Main search: run many random restarts in batches.
         Returns ALL exact decompositions found.
         """
         results = []
-        init_methods = ['gaussian', 'sparse', 'uniform']
+        batch_size = min(30, n_restarts)
         
         if verbose:
             print(f"\nSearching for <{self.m},{self.p},{self.n}> "
                   f"rank-{R} decomposition")
             print(f"  Tensor shape: {self.T.shape}")
             print(f"  Standard rank: {self.m * self.p * self.n}")
-            print(f"  Restarts: {n_restarts}, Steps/restart: {n_steps}")
+            print(f"  Restarts: {n_restarts}, Steps/restart: {n_steps}, Batch Size: {batch_size}")
             print()
-        
+            
         t_start = time.time()
         
-        for restart in range(n_restarts):
-            init = init_methods[restart % len(init_methods)]
+        restarts_done = 0
+        while restarts_done < n_restarts:
+            B = min(batch_size, n_restarts - restarts_done)
             
-            # Vary learning rate across restarts
-            lr_this = lr * (0.5 + np.random.rand())
-            
-            result = self.search_single(
-                R, n_steps=n_steps, lr=lr_this,
-                init_method=init, verbose=False
+            batched_results = self.search_batched(
+                R, B=B, n_steps=n_steps, lr=lr, verbose=False
             )
             
-            if result is not None and result.is_exact:
-                results.append(result)
-                if verbose:
-                    elapsed = time.time() - t_start
-                    print(f"  restart {restart:>4d} [{elapsed:>7.1f}s]: "
-                          f"FOUND — {result.summary()}")
-            elif verbose and restart % 50 == 0:
+            for res in batched_results:
+                if res.is_exact:
+                    results.append(res)
+                    if verbose:
+                        elapsed = time.time() - t_start
+                        print(f"  Found exact solution! [{elapsed:>7.1f}s]: "
+                              f"FOUND — {res.summary()}")
+            
+            restarts_done += B
+            if verbose:
                 elapsed = time.time() - t_start
-                print(f"  restart {restart:>4d} [{elapsed:>7.1f}s]: "
-                      f"no exact solution ({len(results)} found so far)")
-        
+                print(f"  Completed {restarts_done}/{n_restarts} restarts [{elapsed:>7.1f}s] "
+                      f"({len(results)} found so far)")
+                      
         elapsed = time.time() - t_start
         if verbose:
             print(f"\nCompleted in {elapsed:.1f}s. "
-                  f"Found {len(results)} exact decomposition(s).")
-        
+                  f"Total exact solutions found: {len(results)}")
+            
         return results
 
 

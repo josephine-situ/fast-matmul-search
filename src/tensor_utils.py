@@ -202,12 +202,19 @@ def get_lower_bound(m: int, p: int, n: int, field: str = "arbitrary") -> int:
         return KNOWN_LOWER_BOUNDS[dims]
         
     # Asymptotic exact rank lower bound for square matrices (Blaser 1999)
-    if m == p == n:
+    if dims[0] == dims[1] == dims[2]:
+        m = dims[0]
         return int(np.ceil(2.5 * (m**2) - 3 * m))
     
     # Mathematical absolute minimum (cannot use fewer mults than the dimensions)
     # Actually, a simple lower bound is max(m*p, p*n, m*n).
-    return max(m*p, p*n, m*n)
+    bound = max(dims[0]*dims[1], dims[1]*dims[2], dims[0]*dims[2])
+    
+    # Hopcroft-Kerr bound for <2,2,n>
+    if dims[0] == 2 and dims[1] == 2:
+        bound = max(bound, int(np.ceil(7 * dims[2] / 2)))
+        
+    return bound
 
 KNOWN_RANKS: Dict[Tuple[int, int, int], Tuple[int, str]] = {
     # mpn = 8
@@ -217,8 +224,8 @@ KNOWN_RANKS: Dict[Tuple[int, int, int], Tuple[int, str]] = {
     (2, 2, 3): (11, "Hopcroft-Kerr 1971"),
     
     # mpn = 16
-    (2, 2, 4): (15, "Strassen recursive / known"),  
-    (2, 4, 2): (15, "symmetry of above"),
+    (2, 2, 4): (14, "Hopcroft-Kerr 1971 / 2x Strassen"),  
+    (2, 4, 2): (14, "symmetry of above"),
     
     # mpn = 18
     (2, 3, 3): (15, "Smirnov / Pan"),
@@ -228,7 +235,7 @@ KNOWN_RANKS: Dict[Tuple[int, int, int], Tuple[int, str]] = {
     
     # mpn = 24
     (2, 3, 4): (26, "Smirnov"),
-    (2, 2, 6): (22, "various"),
+    (2, 2, 6): (21, "3x Strassen"),
     
     # mpn = 27
     (3, 3, 3): (23, "Makarov-Smirnov / AlphaTensor"),
@@ -238,7 +245,7 @@ KNOWN_RANKS: Dict[Tuple[int, int, int], Tuple[int, str]] = {
     
     # mpn = 32
     (2, 4, 4): (36, "Smirnov — needs verification"),
-    (2, 2, 8): (29, "Strassen recursive"),
+    (2, 2, 8): (28, "4x Strassen"),
     
     # mpn = 36
     (3, 3, 4): (29, "AlphaTensor 2022"),
