@@ -63,7 +63,7 @@ def load_decompositions(output_dir: str) -> Dict[str, List]:
     return decomps
 
 
-def full_analysis(output_dir: str = 'batch_results_v2'):
+def full_analysis(output_dir: str = 'batch_results'):
     """Complete analysis of all results."""
     
     log = load_results(output_dir)
@@ -177,5 +177,5 @@ def full_analysis(output_dir: str = 'batch_results_v2'):
 
 
 if __name__ == "__main__":
-    output_dir = sys.argv[1] if len(sys.argv) > 1 else 'batch_results_v2'
+    output_dir = sys.argv[1] if len(sys.argv) > 1 else 'batch_results'
     full_analysis(output_dir)
