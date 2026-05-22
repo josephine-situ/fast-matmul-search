@@ -24,4 +24,5 @@ py-modules = [
     "pipeline",
     "run_experiments",
     "validation",
+    "flip_graph_hybrid",
 ]
