@@ -12,7 +12,7 @@ import sys
 import numpy as np
 from typing import List, Dict
 
-from tensor_utils import KNOWN_RANKS, DecompositionResult
+from tensor_utils import KNOWN_RANKS, DecompositionResult, build_mult_tensor, wrong_entries
 from continuous_search import ContinuousSearch
 from validation import verify_all
 
@@ -101,22 +101,32 @@ def define_experiments() -> List[Dict]:
 
 
 def run_single_experiment(m: int, p: int, n: int, target_rank: int,
-                           config: Dict) -> List[DecompositionResult]:
-    """Run all methods on a single case, return verified results."""
+                           config: Dict):
+    """Run all methods on a single case.
 
+    Returns (verified_results, near_miss_info) where near_miss_info is a dict
+    with reconstruction-error diagnostics from the best non-exact attempt
+    (useful for deciding whether flip-graph search is viable).
+    """
     all_results = []
+    best_near_miss = None
 
     # Method 1: Gradient search
     try:
         import torch
         searcher = ContinuousSearch(m, p, n, device=config.get('device', 'cpu'))
-        grad_results = searcher.search(
+        grad_results, grad_near_miss = searcher.search(
             R=target_rank,
             n_restarts=config['gradient_restarts'],
             n_steps=config['gradient_steps'],
             verbose=False
         )
         all_results.extend(grad_results)
+        if grad_near_miss is not None:
+            if (best_near_miss is None
+                    or grad_near_miss.reconstruction_error
+                    < best_near_miss.reconstruction_error):
+                best_near_miss = grad_near_miss
     except ImportError:
         pass
 
@@ -127,7 +137,21 @@ def run_single_experiment(m: int, p: int, n: int, target_rank: int,
         if report['verified']:
             verified.append(r)
 
-    return verified
+    # Build near-miss diagnostics
+    near_miss_info = None
+    if best_near_miss is not None and not best_near_miss.is_exact:
+        T = build_mult_tensor(m, p, n)
+        n_wrong, n_total = wrong_entries(T, best_near_miss.U, best_near_miss.V,
+                                         best_near_miss.W)
+        near_miss_info = {
+            'recon_error': float(best_near_miss.reconstruction_error),
+            'n_wrong_entries': n_wrong,
+            'total_entries': n_total,
+            'pct_correct': 100.0 * (1 - n_wrong / n_total),
+            'flip_graph_candidate': n_wrong <= max(3, int(0.1 * n_total)),
+        }
+
+    return verified, near_miss_info
 
 
 def batch_run(config: Dict = None):
@@ -180,7 +204,7 @@ def batch_run(config: Dict = None):
         print(f"[{i+1}/{len(experiments)}] <{m},{p},{n}> rank {target_rank} ({purpose})")
 
         t_start = time.time()
-        results = run_single_experiment(m, p, n, target_rank, config)
+        results, near_miss_info = run_single_experiment(m, p, n, target_rank, config)
         elapsed = time.time() - t_start
 
         entry = {
@@ -215,7 +239,16 @@ def batch_run(config: Dict = None):
                   f"[best: max_coeff={best.max_coefficient}, "
                   f"method={best.method}]")
         else:
-            print(f"  No solutions in {elapsed:.1f}s")
+            if near_miss_info is not None:
+                entry['near_miss'] = near_miss_info
+                nm = near_miss_info
+                tag = " *** FLIP-GRAPH CANDIDATE ***" if nm['flip_graph_candidate'] else ""
+                print(f"  No exact solution in {elapsed:.1f}s  |  "
+                      f"near-miss: {nm['n_wrong_entries']}/{nm['total_entries']} "
+                      f"wrong ({nm['pct_correct']:.1f}% correct), "
+                      f"max_err={nm['recon_error']:.4f}{tag}")
+            else:
+                print(f"  No solutions in {elapsed:.1f}s")
 
         log.append(entry)
 
@@ -239,6 +272,17 @@ def batch_run(config: Dict = None):
         for e in improvements:
             print(f"    <{e['case'][0]},{e['case'][1]},{e['case'][2]}> "
                   f"rank {e['target_rank']}")
+
+    flip_candidates = [e for e in log
+                       if e.get('near_miss', {}).get('flip_graph_candidate')]
+    if flip_candidates:
+        print(f"\n  FLIP-GRAPH CANDIDATES ({len(flip_candidates)}):")
+        for e in flip_candidates:
+            nm = e['near_miss']
+            print(f"    <{e['case'][0]},{e['case'][1]},{e['case'][2]}> "
+                  f"rank {e['target_rank']}  "
+                  f"{nm['n_wrong_entries']}/{nm['total_entries']} wrong "
+                  f"({nm['pct_correct']:.1f}% correct)")
 
     return log
 

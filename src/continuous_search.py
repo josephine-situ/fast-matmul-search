@@ -15,8 +15,8 @@ Key design decisions:
 import numpy as np
 import torch
 import torch.nn.functional as F
-from typing import List, Optional, Tuple
-from tensor_utils import (build_mult_tensor, verify_decomposition, 
+from typing import Dict, List, Optional, Tuple
+from tensor_utils import (build_mult_tensor, verify_decomposition,
                            make_result, DecompositionResult)
 import time
 
@@ -189,10 +189,12 @@ class ContinuousSearch:
         return loss
     
     def search_batched(self, R: int, B: int, n_steps: int = 20000,
-                       lr: float = 0.003, verbose: bool = False) -> List[DecompositionResult]:
+                       lr: float = 0.003, verbose: bool = False
+                       ) -> Tuple[List[DecompositionResult], Optional[DecompositionResult]]:
         """
         Batched optimization run solving B restarts simultaneously.
-        Dramatically reduces overhead.
+        Returns (exact_results, best_near_miss) where best_near_miss is the
+        closest non-exact rounded solution across the batch.
         """
         # We manually initialize batch. We can vary initialization method per batch element.
         U = torch.zeros(B, self.d1, R, dtype=torch.float64, device=self.device)
@@ -302,7 +304,17 @@ class ContinuousSearch:
                                            best_W[b].cpu().numpy(),
                                            self.m, self.p, self.n,
                                            'gradient', 'Z'))
-        return results
+
+        # Build near-miss from the batch element with lowest rounded error
+        with torch.no_grad():
+            best_idx = best_rounded_error.argmin().item()
+            near_miss = make_result(
+                best_U[best_idx].cpu().numpy(),
+                best_V[best_idx].cpu().numpy(),
+                best_W[best_idx].cpu().numpy(),
+                self.m, self.p, self.n, 'gradient', 'Z')
+
+        return results, near_miss
 
     def search_single(self, R: int, n_steps: int = 20000,
                        lr: float = 0.003, init_method: str = 'gaussian',
@@ -500,12 +512,14 @@ class ContinuousSearch:
     
     def search(self, R: int, n_restarts: int = 200, n_steps: int = 20000,
                lr: float = 0.003, verbose: bool = True
-               ) -> List[DecompositionResult]:
+               ) -> Tuple[List[DecompositionResult], Optional[DecompositionResult]]:
         """
         Main search: run many random restarts in batches.
-        Returns ALL exact decompositions found.
+        Returns (exact_results, best_near_miss) where best_near_miss is the
+        closest non-exact rounded solution seen across all restarts.
         """
         results = []
+        best_near_miss: Optional[DecompositionResult] = None
         batch_size = min(30, n_restarts)
         
         if verbose:
@@ -522,10 +536,16 @@ class ContinuousSearch:
         while restarts_done < n_restarts:
             B = min(batch_size, n_restarts - restarts_done)
             
-            batched_results = self.search_batched(
+            batched_results, batch_near_miss = self.search_batched(
                 R, B=B, n_steps=n_steps, lr=lr, verbose=False
             )
             
+            if batch_near_miss is not None:
+                if (best_near_miss is None
+                        or batch_near_miss.reconstruction_error
+                        < best_near_miss.reconstruction_error):
+                    best_near_miss = batch_near_miss
+
             for res in batched_results:
                 if res.is_exact:
                     results.append(res)
@@ -544,8 +564,10 @@ class ContinuousSearch:
         if verbose:
             print(f"\nCompleted in {elapsed:.1f}s. "
                   f"Total exact solutions found: {len(results)}")
+            if not results and best_near_miss is not None:
+                print(f"  Best near-miss error: {best_near_miss.reconstruction_error:.6f}")
             
-        return results
+        return results, best_near_miss
 
 
 class ALSSearch:

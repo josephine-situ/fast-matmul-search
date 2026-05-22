@@ -6,7 +6,6 @@ set -e
 echo "Starting full pipeline at $(date)"
 echo "This will take many hours. Results saved incrementally."
 
-# Run the batch
-python -u -m src.run_experiments --output-dir results/full_$(date +%Y%m%d)
+python -u -m src.run_experiments
 
 echo "Completed at $(date)"

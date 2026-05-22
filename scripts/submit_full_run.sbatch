@@ -28,6 +28,6 @@ export OPENBLAS_NUM_THREADS=${SLURM_CPUS_PER_TASK:-1}
 export MKL_NUM_THREADS=${SLURM_CPUS_PER_TASK:-1}
 export NUMEXPR_NUM_THREADS=${SLURM_CPUS_PER_TASK:-1}
 
-python -u -m src.run_experiments_v3
+python -u -m src.run_experiments
 
 echo "End: $(date)"

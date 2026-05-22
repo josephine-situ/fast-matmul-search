@@ -98,6 +98,14 @@ def count_additions(U: np.ndarray, V: np.ndarray, W: np.ndarray) -> int:
     return total
 
 
+def wrong_entries(T: np.ndarray, U: np.ndarray, V: np.ndarray,
+                  W: np.ndarray) -> Tuple[int, int]:
+    """Return (n_wrong, n_total) for the rounded integer reconstruction."""
+    T_recon = np.einsum('ir,jr,kr->ijk', U, V, W)
+    diff = np.abs(T - T_recon)
+    return int((diff > 0.5).sum()), int(T.size)
+
+
 def make_result(U, V, W, m, p, n, method, field) -> DecompositionResult:
     """Package arrays into a DecompositionResult."""
     T = build_mult_tensor(m, p, n)
