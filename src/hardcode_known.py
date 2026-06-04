@@ -14,7 +14,14 @@ Sources:
 """
 
 import numpy as np
+from itertools import permutations
+from typing import Dict, List, Optional, Tuple
+
 from tensor_utils import build_mult_tensor, verify_decomposition
+
+# Canonical literature decompositions for hamming / seeding.
+# Each entry: (name, U, V, W) with matching (m, p, n) implied by caller key.
+KNOWN_DECOMPOSITIONS: Dict[Tuple[int, int, int], List[Tuple[str, np.ndarray, np.ndarray, np.ndarray]]] = {}
 
 
 def strassen_222():
@@ -41,6 +48,54 @@ def strassen_222():
     ], dtype=np.int64)
     
     return U, V, W
+
+
+def _register_known(m: int, p: int, n: int, name: str, U: np.ndarray, V: np.ndarray, W: np.ndarray) -> None:
+    key = (m, p, n)
+    KNOWN_DECOMPOSITIONS.setdefault(key, []).append((name, U, V, W))
+
+
+def _factor_entry_hamming(
+    U: np.ndarray, V: np.ndarray, W: np.ndarray,
+    U2: np.ndarray, V2: np.ndarray, W2: np.ndarray,
+) -> int:
+    """Entry-wise Hamming distance on rounded integer factors."""
+    return int(
+        (U != U2).sum() + (V != V2).sum() + (W != W2).sum()
+    )
+
+
+def min_hamming_to_known(
+    m: int, p: int, n: int,
+    U: np.ndarray, V: np.ndarray, W: np.ndarray,
+) -> Optional[int]:
+    """
+    Minimum Hamming distance to any registered known decomposition,
+    minimizing over column permutations (scale/sign equivalence not searched).
+    """
+    catalog = KNOWN_DECOMPOSITIONS.get((m, p, n))
+    if not catalog:
+        return None
+
+    U_r = np.round(U).astype(np.int64)
+    V_r = np.round(V).astype(np.int64)
+    W_r = np.round(W).astype(np.int64)
+    R = U_r.shape[1]
+
+    best: Optional[int] = None
+    for _name, Uk, Vk, Wk in catalog:
+        Uk = np.round(Uk).astype(np.int64)
+        Vk = np.round(Vk).astype(np.int64)
+        Wk = np.round(Wk).astype(np.int64)
+        for perm in permutations(range(R)):
+            pidx = list(perm)
+            h = _factor_entry_hamming(
+                U_r, V_r, W_r,
+                Uk[:, pidx], Vk[:, pidx], Wk[:, pidx],
+            )
+            if best is None or h < best:
+                best = h
+    return best
 
 
 def hopcroft_kerr_223():
@@ -135,6 +190,15 @@ def verify_all_known():
     print()
     print("NOTE: Failed decompositions need to be found by the pipeline")
     print("and then hardcoded here for future seeding.")
+
+
+def _init_known_registry() -> None:
+    """Populate KNOWN_DECOMPOSITIONS with verified canonical forms."""
+    U, V, W = strassen_222()
+    _register_known(2, 2, 2, "Strassen", U, V, W)
+
+
+_init_known_registry()
 
 
 if __name__ == "__main__":

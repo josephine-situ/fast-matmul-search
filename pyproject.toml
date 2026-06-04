@@ -26,4 +26,5 @@ py-modules = [
     "overrank_search",
     "validation",
     "flip_graph_hybrid",
+    "hardcode_known",
 ]

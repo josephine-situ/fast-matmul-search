@@ -170,6 +170,108 @@ def _load_baseline_log(output_dir: str) -> Dict[tuple, Dict]:
     return out
 
 
+def _load_baseline_entries(baseline_dir: str) -> List[Dict]:
+    path = os.path.join(baseline_dir, "experiment_log.json")
+    if not os.path.exists(path):
+        return []
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def baseline_n_found(
+    baseline_entries: List[Dict],
+    case: tuple,
+    target_rank: int,
+) -> int:
+    """Best n_found across all baseline runs for this <m,p,n> and rank."""
+    best = 0
+    for e in baseline_entries:
+        if tuple(e["case"]) == case and e["target_rank"] == target_rank:
+            best = max(best, int(e.get("n_found", 0)))
+    return best
+
+
+def _discover_priority_key(exp: Dict, baseline_entries: List[Dict]) -> tuple:
+    """Lower sorts earlier: tier, near-miss signal, smaller tensor, rank."""
+    m, p, n = exp["case"]
+    rank = exp["target_rank"]
+    tensor_entries = m * p * n
+    near = 999
+    for e in baseline_entries:
+        if tuple(e["case"]) == (m, p, n) and e["target_rank"] == rank:
+            nm = e.get("near_miss")
+            if nm:
+                near = int(nm.get("n_wrong_entries", 999))
+    return (exp["tier"], near, tensor_entries, rank)
+
+
+def select_overrank_experiments(
+    queue: str,
+    baseline_dir: str = "batch_results",
+    max_tier: Optional[int] = None,
+) -> List[Dict]:
+    """
+    Build the over-rank experiment list from define_experiments() and
+    batch_results/experiment_log.json.
+
+    validate — cases where baseline gradient (or other methods in the batch
+               log) already found at least one exact decomposition at this rank.
+               Includes validate + sparsity tiers.
+
+    discover — literature validate/improve targets with baseline n_found == 0,
+               sorted by tier then near-miss quality (flip-graph candidates first).
+    """
+    baseline_entries = _load_baseline_entries(baseline_dir)
+    all_exps = define_experiments()
+    selected: List[Dict] = []
+
+    for exp in all_exps:
+        if max_tier is not None and exp["tier"] > max_tier:
+            continue
+        case = exp["case"]
+        rank = exp["target_rank"]
+        purpose = exp["purpose"]
+        n_base = baseline_n_found(baseline_entries, case, rank)
+
+        if queue == "validate":
+            if purpose not in ("validate", "sparsity"):
+                continue
+            if n_base <= 0:
+                continue
+            selected.append(exp)
+        elif queue == "discover":
+            if purpose not in ("validate", "improve"):
+                continue
+            if n_base > 0:
+                continue
+            selected.append(exp)
+        else:
+            raise ValueError(f"Unknown overrank queue: {queue!r}")
+
+    if queue == "discover":
+        selected.sort(key=lambda e: _discover_priority_key(e, baseline_entries))
+
+    return selected
+
+
+def print_overrank_queue_plan(
+    queue: str,
+    experiments: List[Dict],
+    baseline_dir: str = "batch_results",
+) -> None:
+    baseline_entries = _load_baseline_entries(baseline_dir)
+    print(f"\nOver-rank queue={queue!r}: {len(experiments)} experiment(s)")
+    for i, exp in enumerate(experiments):
+        m, p, n = exp["case"]
+        r = exp["target_rank"]
+        nb = baseline_n_found(baseline_entries, (m, p, n), r)
+        print(
+            f"  [{i + 1}] <{m},{p},{n}> rank {r} tier {exp['tier']} "
+            f"({exp['purpose']}) baseline_n_found={nb} — {exp.get('name', '')}"
+        )
+    print()
+
+
 def run_overrank_experiment(
     m: int,
     p: int,
@@ -188,7 +290,10 @@ def run_overrank_experiment(
 
     output_dir = config["output_dir"]
     os.makedirs(output_dir, exist_ok=True)
-    restart_log = os.path.join(output_dir, "overrank_restarts.jsonl")
+    restart_log = config.get("restart_log_path")
+    if not restart_log:
+        queue = config.get("overrank_queue", "full")
+        restart_log = os.path.join(output_dir, f"overrank_restarts_{queue}.jsonl")
 
     searcher = ContinuousSearch(m, p, n, device=config.get("device", "cpu"))
     budget_mode = config.get("budget_mode", "flops_matched")
@@ -237,6 +342,7 @@ def run_overrank_experiment(
         "mean_gap_ratio_loo": summary.get("mean_gap_ratio_loo"),
         "unique_rounded_candidates": summary.get("unique_rounded_candidates"),
         "hardware": config.get("device", "cpu"),
+        "overrank_queue": config.get("overrank_queue"),
     }
 
     tier = exp_meta.get("tier")
@@ -253,19 +359,35 @@ def run_overrank_experiment(
 
         save_path = os.path.join(output_dir, f"{m}_{p}_{n}_rank{target_rank}_overrank")
         os.makedirs(save_path, exist_ok=True)
-        for j, r in enumerate(verified):
+        seen_keys = set()
+        j = 0
+        for r in verified:
+            key = (
+                np.round(r.U).astype(np.int16).tobytes()
+                + np.round(r.V).astype(np.int16).tobytes()
+                + np.round(r.W).astype(np.int16).tobytes()
+            ).hex()
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
             np.savez(
                 os.path.join(save_path, f"solution_{j}.npz"),
                 U=r.U,
                 V=r.V,
                 W=r.W,
+                method=r.method,
+                additions=r.num_additions,
+                max_coeff=r.max_coefficient,
+                reconstruction_error=r.reconstruction_error,
             )
+            j += 1
+        entry["n_saved_decompositions"] = j
 
     return entry
 
 
 def batch_run_overrank(config: Dict = None):
-    """Run define_experiments() queue with Formulation B'."""
+    """Run Formulation B' on a validate or discover queue (see select_overrank_experiments)."""
     if config is None:
         config = {
             "gradient_restarts": 300,
@@ -277,11 +399,26 @@ def batch_run_overrank(config: Dict = None):
             "budget_mode": "flops_matched",
             "extra_scale": 0.25,
             "verbose": True,
+            "overrank_queue": "validate",
+            "max_wall_seconds": 5.5 * 3600,
         }
 
     os.makedirs(config["output_dir"], exist_ok=True)
-    experiments = define_experiments()
-    log_file = os.path.join(config["output_dir"], "overrank_experiment_log.json")
+    queue = config.get("overrank_queue", "validate")
+    max_tier = config.get("max_tier")
+    experiments = select_overrank_experiments(
+        queue,
+        baseline_dir=config.get("baseline_dir", "batch_results"),
+        max_tier=max_tier,
+    )
+    print_overrank_queue_plan(queue, experiments, config.get("baseline_dir", "batch_results"))
+
+    log_file = os.path.join(
+        config["output_dir"], f"overrank_experiment_log_{queue}.json"
+    )
+    config["restart_log_path"] = os.path.join(
+        config["output_dir"], f"overrank_restarts_{queue}.jsonl"
+    )
 
     log: List[Dict] = []
     completed = set()
@@ -294,8 +431,15 @@ def batch_run_overrank(config: Dict = None):
         except Exception as exc:
             print(f"Warning: could not load {log_file}: {exc}")
 
+    batch_t0 = time.time()
+    max_wall = config.get("max_wall_seconds")
     tier0_regressions = 0
     for i, exp in enumerate(experiments):
+        if max_wall is not None and (time.time() - batch_t0) >= max_wall:
+            print(
+                f"Stopping queue {queue!r}: reached max_wall_seconds={max_wall:.0f}"
+            )
+            break
         m, p, n = exp["case"]
         target_rank = exp["target_rank"]
         purpose = exp["purpose"]
@@ -462,34 +606,97 @@ def batch_run(config: Dict = None):
     return log
 
 
+def _parse_overrank_queue(argv: List[str]) -> str:
+    if "--overrank-queue" in argv:
+        idx = argv.index("--overrank-queue")
+        if idx + 1 >= len(argv):
+            raise SystemExit("--overrank-queue requires validate or discover")
+        return argv[idx + 1]
+    return "validate"
+
+
+def _env_int(name: str, default: Optional[int]) -> Optional[int]:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    return int(raw)
+
+
+def _env_float(name: str, default: Optional[float]) -> Optional[float]:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    return float(raw)
+
+
+def _overrank_config_for_queue(queue: str, argv: List[str]) -> Dict:
+    import torch
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if "--quick" in argv:
+        return {
+            "gradient_restarts": 30,
+            "gradient_steps": 8000,
+            "overrank_restarts": 5,
+            "device": "cpu",
+            "output_dir": "quick_results",
+            "baseline_dir": "batch_results",
+            "budget_mode": "flops_matched",
+            "extra_scale": 0.25,
+            "verbose": True,
+            "overrank_queue": queue,
+            "max_wall_seconds": None,
+        }
+
+    budget_mode = "steps_matched" if "--steps-matched" in argv else "flops_matched"
+    max_wall_h = _env_float("OVER_RANK_MAX_WALL_HOURS", 5.5)
+    max_wall_seconds = None if max_wall_h is None else max_wall_h * 3600
+
+    if queue == "validate":
+        return {
+            "gradient_restarts": 300,
+            "gradient_steps": 25000,
+            "gradient_lr": 0.003,
+            "overrank_restarts": _env_int("OVER_RANK_RESTARTS", 100),
+            "device": device,
+            "output_dir": "batch_results",
+            "baseline_dir": "batch_results",
+            "budget_mode": budget_mode,
+            "extra_scale": 0.25,
+            "verbose": True,
+            "overrank_queue": "validate",
+            "max_tier": _env_int("OVER_RANK_MAX_TIER", 1),
+            "max_wall_seconds": max_wall_seconds,
+        }
+    # discover: harder cases — full restart budget, tier-1 literature gaps first
+    return {
+        "gradient_restarts": 300,
+        "gradient_steps": 25000,
+        "gradient_lr": 0.003,
+        "overrank_restarts": _env_int("OVER_RANK_RESTARTS", 300),
+        "device": device,
+        "output_dir": "batch_results",
+        "baseline_dir": "batch_results",
+        "budget_mode": budget_mode,
+        "extra_scale": 0.25,
+        "verbose": True,
+        "overrank_queue": "discover",
+        "max_tier": _env_int("OVER_RANK_MAX_TIER", 3),
+        "max_wall_seconds": max_wall_seconds,
+    }
+
+
 if __name__ == "__main__":
     if "--overrank" in sys.argv:
-        if "--quick" in sys.argv:
-            config = {
-                "gradient_restarts": 30,
-                "gradient_steps": 8000,
-                "overrank_restarts": 5,
-                "device": "cpu",
-                "output_dir": "quick_results",
-                "baseline_dir": "batch_results",
-                "budget_mode": "flops_matched",
-                "extra_scale": 0.25,
-                "verbose": True,
-            }
-        elif "--steps-matched" in sys.argv:
-            config = {
-                "gradient_restarts": 300,
-                "gradient_steps": 25000,
-                "device": "cpu",
-                "output_dir": "batch_results",
-                "baseline_dir": "batch_results",
-                "budget_mode": "steps_matched",
-                "extra_scale": 0.25,
-                "verbose": True,
-            }
-        else:
-            config = None
-        batch_run_overrank(config)
+        if "--list-queue" in sys.argv:
+            q = _parse_overrank_queue(sys.argv)
+            exps = select_overrank_experiments(
+                q, baseline_dir="batch_results", max_tier=3 if q == "discover" else 2
+            )
+            print_overrank_queue_plan(q, exps)
+            raise SystemExit(0)
+        queue = _parse_overrank_queue(sys.argv)
+        batch_run_overrank(_overrank_config_for_queue(queue, sys.argv))
     elif "--quick" in sys.argv:
         config = {
             "gradient_restarts": 30,

@@ -8,14 +8,17 @@
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
 #
-# Formulation B' batch (define_experiments tiers 0→3).
+# Legacy wrapper — prefer the 6h split jobs (validation + discover):
 #
-#   sbatch scripts/submit_overrank_run.sbatch
+#   sbatch scripts/submit_overrank_validate.sbatch
+#   sbatch scripts/submit_overrank_discover.sbatch
+#
+# Quick local smoke test:
 #   sbatch --export=MODE=quick scripts/submit_overrank_run.sbatch
-#   sbatch --export=MODE=steps_matched scripts/submit_overrank_run.sbatch
 #
-# Logs: batch_results/overrank_restarts.jsonl, overrank_experiment_log.json
-# Baseline comparison: batch_results/experiment_log.json
+# Preview queues without GPU:
+#   python -m run_experiments --overrank --list-queue --overrank-queue validate
+#   python -m run_experiments --overrank --list-queue --overrank-queue discover
 
 set -euo pipefail
 
@@ -25,9 +28,8 @@ mkdir -p logs batch_results
 echo "========== Job Info =========="
 echo "Host: $(hostname)"
 echo "Start: $(date)"
-echo "Submit dir: ${SLURM_SUBMIT_DIR:-$PWD}"
-echo "PWD: $PWD"
-echo "MODE: ${MODE:-full}"
+echo "MODE: ${MODE:-validate}"
+echo "Use submit_overrank_validate.sbatch + submit_overrank_discover.sbatch for production."
 echo "================================"
 
 if [[ -f .venv/bin/activate ]]; then
@@ -47,14 +49,20 @@ export NUMEXPR_NUM_THREADS=${SLURM_CPUS_PER_TASK:-1}
 
 python -m pip install -e . -q
 
-ARGS=(--overrank)
-case "${MODE:-full}" in
-  quick)          ARGS+=(--quick) ;;
-  steps_matched)  ARGS+=(--steps-matched) ;;
-  full)           ;;
-  *) echo "Unknown MODE=${MODE}; use full, quick, or steps_matched" >&2; exit 1 ;;
+case "${MODE:-validate}" in
+  quick)
+    python -u -m run_experiments --overrank --quick --overrank-queue validate
+    ;;
+  discover)
+    python -u -m run_experiments --overrank --overrank-queue discover
+    ;;
+  validate|full)
+    python -u -m run_experiments --overrank --overrank-queue validate
+    ;;
+  *)
+    echo "Unknown MODE=${MODE}; use validate, discover, or quick" >&2
+    exit 1
+    ;;
 esac
-
-python -u -m run_experiments "${ARGS[@]}"
 
 echo "End: $(date)"

@@ -7,6 +7,7 @@ N=2, FLOP-matched budget, LOO pruning, cancellation penalty.
 from __future__ import annotations
 
 import json
+import os
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -14,7 +15,14 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from tensor_utils import DecompositionResult, build_mult_tensor, make_result, wrong_entries
+from hardcode_known import min_hamming_to_known
+from tensor_utils import (
+    DecompositionResult,
+    build_mult_tensor,
+    make_result,
+    verify_decomposition,
+    wrong_entries,
+)
 
 OVER_RANK_N = 2
 MASS_EPS = 1e-4
@@ -22,9 +30,11 @@ PENALTY_GRAD_CAP = 5.0
 GLOBAL_GRAD_CAP = 5.0
 LOSS_SAMPLE_EVERY = 500
 
-FLOP_SHARE_MAIN = 0.80
-FLOP_SHARE_REFINE = 0.15
-FLOP_SHARE_SNAP = 0.05
+FLOP_SHARE_MAIN = 0.90
+FLOP_SHARE_REFINE = 0.07
+FLOP_SHARE_SNAP = 0.03
+
+INIT_GAUSSIAN_FRAC = 2.0 / 3.0
 
 
 def compute_overrank_step_budget(
@@ -110,13 +120,104 @@ def _loo_deltas(
     return torch.stack(deltas)
 
 
-def _gap_ratio(sorted_vals: np.ndarray, R: int) -> float:
-    if len(sorted_vals) <= R:
+def _max_consecutive_gap_ratio(sorted_vals: np.ndarray) -> float:
+    """Largest ratio sorted[i+1]/sorted[i] over the full ascending mass vector."""
+    if len(sorted_vals) < 2:
         return float("nan")
-    denom = sorted_vals[-(R + 1)]
-    if denom <= 1e-30:
-        return float("inf")
-    return float(sorted_vals[-R] / denom)
+    best = 0.0
+    for i in range(len(sorted_vals) - 1):
+        denom = sorted_vals[i]
+        if denom <= 1e-30:
+            ratio = float("inf")
+        else:
+            ratio = float(sorted_vals[i + 1] / denom)
+        if np.isfinite(ratio):
+            best = max(best, ratio)
+        else:
+            return float("inf")
+    return best if best > 0 else float("nan")
+
+
+def _init_method_for_restart(restart_id: int, n_restarts: int) -> str:
+    """~2/3 gaussian; sparse and uniform are smaller ablation controls."""
+    n_gaussian = int(n_restarts * INIT_GAUSSIAN_FRAC)
+    n_sparse = (n_restarts - n_gaussian) // 2
+    if restart_id < n_gaussian:
+        return "gaussian"
+    if restart_id < n_gaussian + n_sparse:
+        return "sparse"
+    return "uniform"
+
+
+def _frobenius_recon_error(T: np.ndarray, U: np.ndarray, V: np.ndarray, W: np.ndarray) -> float:
+    T_recon = np.einsum("ir,jr,kr->ijk", U, V, W)
+    return float(np.sum((T - T_recon) ** 2))
+
+
+def _try_one_flip_exact(
+    T: np.ndarray,
+    U: np.ndarray,
+    V: np.ndarray,
+    W: np.ndarray,
+    R: int,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, bool]:
+    """Flip one factor entry; return updated factors if reconstruction becomes exact."""
+    U_i = np.round(U).astype(np.int64)
+    V_i = np.round(V).astype(np.int64)
+    W_i = np.round(W).astype(np.int64)
+
+    if verify_decomposition(T, U_i.astype(float), V_i.astype(float), W_i.astype(float)) < 1e-10:
+        return U_i, V_i, W_i, False
+
+    candidates = (-1, 0, 1)
+    for name, M in (("U", U_i), ("V", V_i), ("W", W_i)):
+        for i in range(M.shape[0]):
+            for r in range(R):
+                orig = int(M[i, r])
+                for new_val in candidates:
+                    if new_val == orig:
+                        continue
+                    U_try, V_try, W_try = U_i.copy(), V_i.copy(), W_i.copy()
+                    if name == "U":
+                        U_try[i, r] = new_val
+                    elif name == "V":
+                        V_try[i, r] = new_val
+                    else:
+                        W_try[i, r] = new_val
+                    err = verify_decomposition(
+                        T,
+                        U_try.astype(float),
+                        V_try.astype(float),
+                        W_try.astype(float),
+                    )
+                    if err < 1e-10:
+                        return U_try, V_try, W_try, True
+    return U_i, V_i, W_i, False
+
+
+def _save_exact_decomposition(
+    output_dir: str,
+    m: int,
+    p: int,
+    n: int,
+    R: int,
+    res: DecompositionResult,
+    tag: str,
+) -> str:
+    save_path = os.path.join(output_dir, f"{m}_{p}_{n}_rank{R}_overrank")
+    os.makedirs(save_path, exist_ok=True)
+    filepath = os.path.join(save_path, f"{tag}.npz")
+    np.savez(
+        filepath,
+        U=res.U,
+        V=res.V,
+        W=res.W,
+        method=res.method,
+        additions=res.num_additions,
+        max_coeff=res.max_coefficient,
+        reconstruction_error=res.reconstruction_error,
+    )
+    return filepath
 
 
 def _min_pair_inner(
@@ -356,6 +457,7 @@ class OverRankSearchMixin:
         init_method: str = "gaussian",
         extra_scale: float = 0.25,
         budget_mode: str = "flops_matched",
+        save_dir: Optional[str] = None,
     ) -> Tuple[Optional[DecompositionResult], Dict[str, Any]]:
         torch.manual_seed(seed)
         np.random.seed(seed % (2 ** 31))
@@ -406,8 +508,8 @@ class OverRankSearchMixin:
             deltas = _loo_deltas(self.T, U, V, W).cpu().numpy()
             sort_mass = np.sort(masses)
             sort_loo = np.sort(deltas)
-            gap_mass = _gap_ratio(sort_mass, R)
-            gap_loo = _gap_ratio(sort_loo, R)
+            gap_mass = _max_consecutive_gap_ratio(sort_mass)
+            gap_loo = _max_consecutive_gap_ratio(sort_loo)
 
             loo_order = np.argsort(-deltas)
             keep_idx = torch.tensor(loo_order[:R], device=self.device, dtype=torch.long)
@@ -468,11 +570,57 @@ class OverRankSearchMixin:
         U_np = U.detach().cpu().numpy()
         V_np = V.detach().cpu().numpy()
         W_np = W.detach().cpu().numpy()
-        U_r = np.round(U_np)
-        V_r = np.round(V_np)
-        W_r = np.round(W_np)
+        if snap_result is not None:
+            U_np = snap_result.U.astype(float)
+            V_np = snap_result.V.astype(float)
+            W_np = snap_result.W.astype(float)
+
         T_np = build_mult_tensor(self.m, self.p, self.n)
+        T_norm_sq = float(np.sum(T_np ** 2))
+
+        U_r = np.round(U_np).astype(np.int64)
+        V_r = np.round(V_np).astype(np.int64)
+        W_r = np.round(W_np).astype(np.int64)
+
+        recon_frobenius_snapped = _frobenius_recon_error(T_np, U_r, V_r, W_r)
+        recon_max_snapped = float(
+            verify_decomposition(
+                T_np, U_r.astype(float), V_r.astype(float), W_r.astype(float)
+            )
+        )
+        one_flip_applied = False
+        if recon_max_snapped >= 1e-10:
+            U_r, V_r, W_r, one_flip_applied = _try_one_flip_exact(
+                T_np, U_r, V_r, W_r, R
+            )
+            recon_frobenius_snapped = _frobenius_recon_error(T_np, U_r, V_r, W_r)
+            recon_max_snapped = float(
+                verify_decomposition(
+                    T_np, U_r.astype(float), V_r.astype(float), W_r.astype(float)
+                )
+            )
+
+        exact_hit_verified = recon_max_snapped < 1e-10
+        exact_hit = exact_hit_verified
         n_wrong, n_total = wrong_entries(T_np, U_r, V_r, W_r)
+        hamming_known = min_hamming_to_known(self.m, self.p, self.n, U_r, V_r, W_r)
+
+        if exact_hit_verified:
+            best_exact = make_result(
+                U_r.astype(float),
+                V_r.astype(float),
+                W_r.astype(float),
+                self.m,
+                self.p,
+                self.n,
+                "overrank",
+                "Z",
+            )
+            if save_dir:
+                tag = f"restart_{restart_id}_seed_{seed}"
+                _save_exact_decomposition(
+                    save_dir, self.m, self.p, self.n, R, best_exact, tag
+                )
 
         record: Dict[str, Any] = {
             "case": [self.m, self.p, self.n],
@@ -492,7 +640,13 @@ class OverRankSearchMixin:
             "recon_loss_final": recon_final,
             "recon_loss_pruned": recon_pruned,
             "recon_loss_refined": recon_refined,
+            "recon_loss_refined_rel": recon_refined / T_norm_sq,
             "recon_loss_snapped": recon_snapped,
+            "recon_frobenius_snapped": recon_frobenius_snapped,
+            "recon_frobenius_snapped_rel": recon_frobenius_snapped / T_norm_sq,
+            "recon_max_snapped": recon_max_snapped,
+            "exact_hit_verified": exact_hit_verified,
+            "one_flip_applied": one_flip_applied,
             "column_masses": sort_mass.tolist(),
             "column_loo_delta": sort_loo.tolist(),
             "gap_ratio_mass": gap_mass,
@@ -509,18 +663,26 @@ class OverRankSearchMixin:
             "near_miss_K2": int(n_wrong <= 2),
             "near_miss_K3": int(n_wrong <= 3),
             "n_wrong_entries": n_wrong,
-            "hamming_to_known": None,
+            "hamming_to_known": hamming_known,
             "effective_rank_samples": [s.get("eff_rank", float("nan")) for s in loss_samples],
             "loss_components_samples": loss_samples,
             "refine_steps": refine_steps_done,
             "refine_hit_cap": refine_hit_cap,
-            "rounded_key": _rounded_key(U_np, V_np, W_np),
+            "rounded_key": _rounded_key(
+                U_r.astype(float), V_r.astype(float), W_r.astype(float)
+            ),
+            "cancel_pen_final": (
+                loss_samples[-1].get("cancel_pen") if loss_samples else None
+            ),
+            "mass_pen_final": (
+                loss_samples[-1].get("mass_pen") if loss_samples else None
+            ),
+            "eff_rank_final": (
+                loss_samples[-1].get("eff_rank") if loss_samples else None
+            ),
         }
 
-        if best_exact is None and exact_hit:
-            best_exact = make_result(U_r, V_r, W_r, self.m, self.p, self.n, "overrank", "Z")
-
-        return best_exact if exact_hit else None, record
+        return best_exact if exact_hit_verified else None, record
 
     def search_overrank(
         self,
@@ -534,26 +696,35 @@ class OverRankSearchMixin:
         verbose: bool = True,
         restart_log_path: Optional[str] = None,
     ) -> Tuple[List[DecompositionResult], Dict[str, Any]]:
-        """Formulation B' search with FLOP-matched restarts and 80/15/5 step split."""
+        """Formulation B' search with FLOP-matched restarts and ~90/7/3 step split."""
         if n_restarts is None:
             n_restarts = compute_overrank_restarts(
                 baseline_restarts, baseline_steps, budget_mode
             )
         n_main, n_refine, n_snap = compute_overrank_step_budget(baseline_steps, budget_mode)
 
-        methods = ["gaussian", "sparse", "uniform"]
         results: List[DecompositionResult] = []
         restart_records: List[Dict[str, Any]] = []
         unique_rounded: set = set()
+        unique_exact_keys: set = set()
         t_start = time.time()
+        save_dir = (
+            os.path.dirname(os.path.abspath(restart_log_path))
+            if restart_log_path
+            else None
+        )
 
         if verbose:
             print(
                 f"\nOver-rank search <{self.m},{self.p},{self.n}> rank {R} "
                 f"N={OVER_RANK_N} budget={budget_mode}"
             )
+            n_gauss = int(n_restarts * INIT_GAUSSIAN_FRAC)
+            n_sparse = (n_restarts - n_gauss) // 2
+            n_uniform = n_restarts - n_gauss - n_sparse
             print(
-                f"  restarts={n_restarts} steps=({n_main}/{n_refine}/{n_snap}) "
+                f"  restarts={n_restarts} (gaussian={n_gauss}, sparse={n_sparse}, "
+                f"uniform={n_uniform}) steps=({n_main}/{n_refine}/{n_snap}) "
                 f"extra_scale={extra_scale}"
             )
 
@@ -561,7 +732,7 @@ class OverRankSearchMixin:
 
         for rid in range(n_restarts):
             seed = int(np.random.randint(0, 2 ** 31 - 1))
-            method = methods[rid % len(methods)]
+            method = _init_method_for_restart(rid, n_restarts)
             res, rec = self._run_overrank_single(
                 R=R,
                 restart_id=rid,
@@ -573,6 +744,7 @@ class OverRankSearchMixin:
                 init_method=method,
                 extra_scale=extra_scale,
                 budget_mode=budget_mode,
+                save_dir=save_dir,
             )
             restart_records.append(rec)
             unique_rounded.add(rec["rounded_key"])
@@ -580,7 +752,10 @@ class OverRankSearchMixin:
                 log_f.write(json.dumps(rec) + "\n")
                 log_f.flush()
             if res is not None and res.is_exact:
-                results.append(res)
+                exact_key = _rounded_key(res.U, res.V, res.W)
+                if exact_key not in unique_exact_keys:
+                    unique_exact_keys.add(exact_key)
+                    results.append(res)
                 if verbose:
                     print(f"  restart {rid}: EXACT — {res.summary()}")
 
