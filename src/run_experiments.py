@@ -3,6 +3,8 @@ Run a systematic batch of experiments on promising targets.
 
 This is the script you run overnight or over a weekend to
 generate results across many cases.
+
+Use --overrank for Formulation B' batch (see overrank_search.py).
 """
 
 import time
@@ -10,11 +12,12 @@ import json
 import os
 import sys
 import numpy as np
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 from tensor_utils import KNOWN_RANKS, DecompositionResult, build_mult_tensor, wrong_entries
 from continuous_search import ContinuousSearch
 from validation import verify_all
+from overrank_search import compute_overrank_step_budget
 
 
 def define_experiments() -> List[Dict]:
@@ -154,6 +157,178 @@ def run_single_experiment(m: int, p: int, n: int, target_rank: int,
     return verified, near_miss_info
 
 
+def _load_baseline_log(output_dir: str) -> Dict[tuple, Dict]:
+    path = os.path.join(output_dir, "experiment_log.json")
+    if not os.path.exists(path):
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        entries = json.load(f)
+    out = {}
+    for e in entries:
+        key = (tuple(e["case"]), e["target_rank"], e.get("purpose", ""))
+        out[key] = e
+    return out
+
+
+def run_overrank_experiment(
+    m: int,
+    p: int,
+    n: int,
+    target_rank: int,
+    config: Dict,
+    exp_meta: Dict,
+) -> Dict:
+    """Run Formulation B' on one case; return case-level log entry."""
+    import torch
+
+    baseline_log = _load_baseline_log(config.get("baseline_dir", "batch_results"))
+    bkey = ((m, p, n), target_rank, exp_meta.get("purpose", ""))
+    baseline_entry = baseline_log.get(bkey) or baseline_log.get(((m, p, n), target_rank, "validate"))
+    n_found_baseline = baseline_entry["n_found"] if baseline_entry else None
+
+    output_dir = config["output_dir"]
+    os.makedirs(output_dir, exist_ok=True)
+    restart_log = os.path.join(output_dir, "overrank_restarts.jsonl")
+
+    searcher = ContinuousSearch(m, p, n, device=config.get("device", "cpu"))
+    budget_mode = config.get("budget_mode", "flops_matched")
+    extra_scale = config.get("extra_scale", 0.25)
+
+    t_start = time.time()
+    results, summary = searcher.search_overrank(
+        R=target_rank,
+        n_restarts=config.get("overrank_restarts"),
+        baseline_steps=config.get("gradient_steps", 25000),
+        baseline_restarts=config.get("gradient_restarts", 300),
+        budget_mode=budget_mode,
+        lr=config.get("gradient_lr", 0.003),
+        extra_scale=extra_scale,
+        verbose=config.get("verbose", True),
+        restart_log_path=restart_log,
+    )
+    elapsed = time.time() - t_start
+
+    verified = [r for r in results if verify_all(r)["verified"]]
+    n_main, n_refine, n_snap = compute_overrank_step_budget(
+        config.get("gradient_steps", 25000), budget_mode
+    )
+
+    delta = None
+    if n_found_baseline is not None:
+        delta = len(verified) - n_found_baseline
+
+    entry = {
+        "case": [m, p, n],
+        "target_rank": target_rank,
+        "purpose": exp_meta.get("purpose"),
+        "tier": exp_meta.get("tier"),
+        "search_mode": "overrank",
+        "budget_mode": budget_mode,
+        "extra_scale": extra_scale,
+        "n_found": len(verified),
+        "n_found_baseline": n_found_baseline,
+        "delta_n_found": delta,
+        "elapsed_seconds": elapsed,
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "n_steps_main": n_main,
+        "n_steps_refine": n_refine,
+        "n_steps_snap": n_snap,
+        "n_restarts": summary.get("n_restarts"),
+        "mean_gap_ratio_loo": summary.get("mean_gap_ratio_loo"),
+        "unique_rounded_candidates": summary.get("unique_rounded_candidates"),
+        "hardware": config.get("device", "cpu"),
+    }
+
+    tier = exp_meta.get("tier")
+    if tier == 1 and delta is not None:
+        entry["tier1_win"] = delta > 0
+    if tier == 3 and delta is not None:
+        entry["tier3_win"] = delta > 0
+
+    if verified:
+        best = min(verified, key=lambda r: (r.max_coefficient, r.num_additions))
+        entry["best_max_coeff"] = int(best.max_coefficient)
+        entry["best_additions"] = int(best.num_additions)
+        entry["best_method"] = best.method
+
+        save_path = os.path.join(output_dir, f"{m}_{p}_{n}_rank{target_rank}_overrank")
+        os.makedirs(save_path, exist_ok=True)
+        for j, r in enumerate(verified):
+            np.savez(
+                os.path.join(save_path, f"solution_{j}.npz"),
+                U=r.U,
+                V=r.V,
+                W=r.W,
+            )
+
+    return entry
+
+
+def batch_run_overrank(config: Dict = None):
+    """Run define_experiments() queue with Formulation B'."""
+    if config is None:
+        config = {
+            "gradient_restarts": 300,
+            "gradient_steps": 25000,
+            "gradient_lr": 0.003,
+            "device": "cuda" if __import__("torch").cuda.is_available() else "cpu",
+            "output_dir": "batch_results",
+            "baseline_dir": "batch_results",
+            "budget_mode": "flops_matched",
+            "extra_scale": 0.25,
+            "verbose": True,
+        }
+
+    os.makedirs(config["output_dir"], exist_ok=True)
+    experiments = define_experiments()
+    log_file = os.path.join(config["output_dir"], "overrank_experiment_log.json")
+
+    log: List[Dict] = []
+    completed = set()
+    if os.path.exists(log_file):
+        try:
+            with open(log_file, "r", encoding="utf-8") as f:
+                log = json.load(f)
+            for e in log:
+                completed.add((tuple(e["case"]), e["target_rank"], e.get("purpose")))
+        except Exception as exc:
+            print(f"Warning: could not load {log_file}: {exc}")
+
+    tier0_regressions = 0
+    for i, exp in enumerate(experiments):
+        m, p, n = exp["case"]
+        target_rank = exp["target_rank"]
+        purpose = exp["purpose"]
+        key = ((m, p, n), target_rank, purpose)
+        if key in completed:
+            print(f"[{i+1}/{len(experiments)}] <{m},{p},{n}> rank {target_rank} ({purpose}) - SKIP")
+            continue
+
+        print(f"[{i+1}/{len(experiments)}] OVER-RANK <{m},{p},{n}> rank {target_rank} tier {exp['tier']} ({purpose})")
+        entry = run_overrank_experiment(m, p, n, target_rank, config, exp)
+        log.append(entry)
+
+        if exp["tier"] == 0 and entry.get("delta_n_found") is not None and entry["delta_n_found"] < 0:
+            if entry.get("n_found_baseline", 0) > 0 and entry["n_found"] == 0:
+                tier0_regressions += 1
+                print(f"  *** Tier 0 regression ({tier0_regressions}) ***")
+
+        delta = entry.get("delta_n_found")
+        print(
+            f"  n_found={entry['n_found']} baseline={entry.get('n_found_baseline')} "
+            f"delta={delta} gap_loo={entry.get('mean_gap_ratio_loo')}"
+        )
+
+        with open(log_file, "w", encoding="utf-8") as f:
+            json.dump(log, f, indent=2)
+
+        if tier0_regressions > 1 and exp["tier"] == 0:
+            print("Aborting: >1 Tier-0 regressions unresolved.")
+            break
+
+    return log
+
+
 def batch_run(config: Dict = None):
     """
     Run experiments on all prioritized targets.
@@ -288,16 +463,44 @@ def batch_run(config: Dict = None):
 
 
 if __name__ == "__main__":
-    if '--quick' in sys.argv:
+    if "--overrank" in sys.argv:
+        if "--quick" in sys.argv:
+            config = {
+                "gradient_restarts": 30,
+                "gradient_steps": 8000,
+                "overrank_restarts": 5,
+                "device": "cpu",
+                "output_dir": "quick_results",
+                "baseline_dir": "batch_results",
+                "budget_mode": "flops_matched",
+                "extra_scale": 0.25,
+                "verbose": True,
+            }
+        elif "--steps-matched" in sys.argv:
+            config = {
+                "gradient_restarts": 300,
+                "gradient_steps": 25000,
+                "device": "cpu",
+                "output_dir": "batch_results",
+                "baseline_dir": "batch_results",
+                "budget_mode": "steps_matched",
+                "extra_scale": 0.25,
+                "verbose": True,
+            }
+        else:
+            config = None
+        batch_run_overrank(config)
+    elif "--quick" in sys.argv:
         config = {
-            'gradient_restarts': 30,
-            'gradient_steps': 8000,
-            'ff_attempts': 200000,
-            'primes': [2, 3],
-            'device': 'cpu',
-            'output_dir': 'quick_results',
+            "gradient_restarts": 30,
+            "gradient_steps": 8000,
+            "ff_attempts": 200000,
+            "primes": [2, 3],
+            "device": "cpu",
+            "output_dir": "quick_results",
         }
     else:
         config = None  # use defaults
 
-    batch_run(config)
+    if "--overrank" not in sys.argv:
+        batch_run(config)

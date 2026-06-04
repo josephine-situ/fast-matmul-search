@@ -18,10 +18,11 @@ import torch.nn.functional as F
 from typing import Dict, List, Optional, Tuple
 from tensor_utils import (build_mult_tensor, verify_decomposition,
                            make_result, DecompositionResult)
+from overrank_search import OverRankSearchMixin
 import time
 
 
-class ContinuousSearch:
+class ContinuousSearch(OverRankSearchMixin):
     """
     Gradient-based search for integer tensor decompositions.
     """

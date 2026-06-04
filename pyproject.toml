@@ -23,5 +23,6 @@ py-modules = [
     "omega_analysis",
     "pipeline",
     "run_experiments",
+    "overrank_search",
     "validation",
 ]
