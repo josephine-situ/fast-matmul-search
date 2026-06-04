@@ -25,4 +25,5 @@ py-modules = [
     "run_experiments",
     "overrank_search",
     "validation",
+    "flip_graph_hybrid",
 ]
