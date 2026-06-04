@@ -12,6 +12,7 @@ from overrank_search import (
     _init_method_for_restart,
     _max_consecutive_gap_ratio,
     _try_one_flip_exact,
+    compute_overrank_step_budget,
 )
 from tensor_utils import build_mult_tensor, verify_decomposition
 
@@ -32,6 +33,15 @@ def test_init_method_two_thirds_gaussian():
     assert methods.count("gaussian") == 20
     assert methods.count("sparse") == 5
     assert methods.count("uniform") == 5
+
+
+def test_discover_budget_allocates_more_refine_than_flops_matched():
+    flops = compute_overrank_step_budget(25000, "flops_matched")
+    discover = compute_overrank_step_budget(25000, "discover")
+    assert discover[0] + discover[1] + discover[2] == flops[0] + flops[1] + flops[2]
+    assert discover[1] > flops[1]
+    assert discover[2] > flops[2]
+    assert discover[0] < flops[0]
 
 
 def test_one_flip_can_fix_single_entry_error():

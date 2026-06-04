@@ -34,7 +34,33 @@ FLOP_SHARE_MAIN = 0.90
 FLOP_SHARE_REFINE = 0.07
 FLOP_SHARE_SNAP = 0.03
 
+# Discover queue: same total FLOPs as flops_matched, more refine/snap after LOO prune.
+DISCOVER_FLOP_SHARE_MAIN = 0.80
+DISCOVER_FLOP_SHARE_REFINE = 0.15
+DISCOVER_FLOP_SHARE_SNAP = 0.05
+
 INIT_GAUSSIAN_FRAC = 2.0 / 3.0
+
+
+def _step_budget_total(baseline_steps: int, budget_mode: str) -> float:
+    if budget_mode == "steps_matched":
+        return baseline_steps / FLOP_SHARE_MAIN
+    # flops_matched and discover share the same total step budget
+    return baseline_steps / OVER_RANK_N
+
+
+def _flop_shares_for_mode(budget_mode: str) -> Tuple[float, float, float]:
+    if budget_mode == "discover":
+        return (
+            DISCOVER_FLOP_SHARE_MAIN,
+            DISCOVER_FLOP_SHARE_REFINE,
+            DISCOVER_FLOP_SHARE_SNAP,
+        )
+    if budget_mode == "steps_matched":
+        return FLOP_SHARE_MAIN, FLOP_SHARE_REFINE, FLOP_SHARE_SNAP
+    if budget_mode == "flops_matched":
+        return FLOP_SHARE_MAIN, FLOP_SHARE_REFINE, FLOP_SHARE_SNAP
+    raise ValueError(f"Unknown budget_mode: {budget_mode!r}")
 
 
 def compute_overrank_step_budget(
@@ -42,13 +68,11 @@ def compute_overrank_step_budget(
     budget_mode: str = "flops_matched",
 ) -> Tuple[int, int, int]:
     """Return (n_steps_main, n_steps_refine, n_steps_snap) for N=2."""
-    if budget_mode == "steps_matched":
-        total = baseline_steps / FLOP_SHARE_MAIN
-    else:
-        total = baseline_steps / OVER_RANK_N
-    n_main = int(total * FLOP_SHARE_MAIN)
-    n_refine = int(total * FLOP_SHARE_REFINE)
-    n_snap = int(total * FLOP_SHARE_SNAP)
+    total = _step_budget_total(baseline_steps, budget_mode)
+    main_s, refine_s, snap_s = _flop_shares_for_mode(budget_mode)
+    n_main = int(total * main_s)
+    n_refine = int(total * refine_s)
+    n_snap = int(total * snap_s)
     return n_main, n_refine, n_snap
 
 
@@ -458,6 +482,7 @@ class OverRankSearchMixin:
         extra_scale: float = 0.25,
         budget_mode: str = "flops_matched",
         save_dir: Optional[str] = None,
+        target_rank: Optional[int] = None,
     ) -> Tuple[Optional[DecompositionResult], Dict[str, Any]]:
         torch.manual_seed(seed)
         np.random.seed(seed % (2 ** 31))
@@ -624,6 +649,7 @@ class OverRankSearchMixin:
 
         record: Dict[str, Any] = {
             "case": [self.m, self.p, self.n],
+            "target_rank": target_rank if target_rank is not None else R,
             "restart_id": restart_id,
             "seed": seed,
             "N": OVER_RANK_N,
@@ -695,8 +721,9 @@ class OverRankSearchMixin:
         extra_scale: float = 0.25,
         verbose: bool = True,
         restart_log_path: Optional[str] = None,
+        target_rank: Optional[int] = None,
     ) -> Tuple[List[DecompositionResult], Dict[str, Any]]:
-        """Formulation B' search with FLOP-matched restarts and ~90/7/3 step split."""
+        """Formulation B' search with FLOP-matched restarts and budget-dependent step split."""
         if n_restarts is None:
             n_restarts = compute_overrank_restarts(
                 baseline_restarts, baseline_steps, budget_mode
@@ -745,6 +772,7 @@ class OverRankSearchMixin:
                 extra_scale=extra_scale,
                 budget_mode=budget_mode,
                 save_dir=save_dir,
+                target_rank=target_rank if target_rank is not None else R,
             )
             restart_records.append(rec)
             unique_rounded.add(rec["rounded_key"])

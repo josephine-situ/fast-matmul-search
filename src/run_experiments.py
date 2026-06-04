@@ -310,6 +310,7 @@ def run_overrank_experiment(
         extra_scale=extra_scale,
         verbose=config.get("verbose", True),
         restart_log_path=restart_log,
+        target_rank=target_rank,
     )
     elapsed = time.time() - t_start
 
@@ -405,7 +406,22 @@ def batch_run_overrank(config: Dict = None):
 
     os.makedirs(config["output_dir"], exist_ok=True)
     queue = config.get("overrank_queue", "validate")
+    if config.get("device") != "cuda" and queue == "discover":
+        raise RuntimeError(
+            f"Refusing discover queue with device={config.get('device')!r}; "
+            "GPU is required."
+        )
     max_tier = config.get("max_tier")
+    n_main, n_refine, n_snap = compute_overrank_step_budget(
+        config.get("gradient_steps", 25000),
+        config.get("budget_mode", "flops_matched"),
+    )
+    print(
+        f"Over-rank batch queue={queue!r} device={config.get('device')} "
+        f"budget_mode={config.get('budget_mode')} "
+        f"steps=({n_main}/{n_refine}/{n_snap}) "
+        f"restarts={config.get('overrank_restarts')}"
+    )
     experiments = select_overrank_experiments(
         queue,
         baseline_dir=config.get("baseline_dir", "batch_results"),
@@ -629,10 +645,48 @@ def _env_float(name: str, default: Optional[float]) -> Optional[float]:
     return float(raw)
 
 
-def _overrank_config_for_queue(queue: str, argv: List[str]) -> Dict:
+def _env_str(name: str, default: str) -> str:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    return raw
+
+
+def _log_torch_device(require_cuda: bool = False) -> str:
+    """Log PyTorch/CUDA info and return the device string for over-rank runs."""
     import torch
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    available = torch.cuda.is_available()
+    print("========== PyTorch / CUDA ==========")
+    print(f"  torch.__version__ = {torch.__version__}")
+    print(f"  torch.version.cuda = {torch.version.cuda}")
+    print(f"  cuda.is_available() = {available}")
+    if available:
+        print(f"  device_name[0] = {torch.cuda.get_device_name(0)}")
+        print(f"  device_count = {torch.cuda.device_count()}")
+    print("====================================")
+    if require_cuda and not available:
+        raise RuntimeError(
+            "CUDA is required for this over-rank queue but torch.cuda.is_available() "
+            "is False. Check the PyTorch wheel vs nvidia-smi on this node before "
+            "running a long batch."
+        )
+    return "cuda" if available else "cpu"
+
+
+def _resolve_overrank_budget_mode(queue: str, argv: List[str]) -> str:
+    if "--steps-matched" in argv:
+        return "steps_matched"
+    if "--flops-matched" in argv:
+        return "flops_matched"
+    if queue == "discover":
+        return _env_str("OVER_RANK_BUDGET_MODE", "discover")
+    return _env_str("OVER_RANK_BUDGET_MODE", "flops_matched")
+
+
+def _overrank_config_for_queue(queue: str, argv: List[str]) -> Dict:
+    require_cuda = queue == "discover"
+    device = _log_torch_device(require_cuda=require_cuda)
     if "--quick" in argv:
         return {
             "gradient_restarts": 30,
@@ -648,7 +702,7 @@ def _overrank_config_for_queue(queue: str, argv: List[str]) -> Dict:
             "max_wall_seconds": None,
         }
 
-    budget_mode = "steps_matched" if "--steps-matched" in argv else "flops_matched"
+    budget_mode = _resolve_overrank_budget_mode(queue, argv)
     max_wall_h = _env_float("OVER_RANK_MAX_WALL_HOURS", 5.5)
     max_wall_seconds = None if max_wall_h is None else max_wall_h * 3600
 
