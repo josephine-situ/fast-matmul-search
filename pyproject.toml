@@ -13,8 +13,12 @@ dependencies = [
     "torch>=2.0",
 ]
 
+[project.optional-dependencies]
+sdp = ["cvxpy", "mosek", "sympy"]
+
 [tool.setuptools]
 package-dir = {"" = "src"}
+packages = ["rpt_slc"]
 py-modules = [
     "tensor_utils",
     "continuous_search",
