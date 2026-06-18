@@ -10,9 +10,14 @@ import json
 import os
 import sys
 import numpy as np
-from typing import List, Dict
+from typing import Dict, List, Optional, Tuple
 
-from tensor_utils import KNOWN_RANKS, DecompositionResult, build_mult_tensor, wrong_entries
+from tensor_utils import (
+    KNOWN_RANKS,
+    DecompositionResult,
+    build_mult_tensor,
+    wrong_entries,
+)
 from continuous_search import ContinuousSearch
 from validation import verify_all
 
@@ -100,58 +105,103 @@ def define_experiments() -> List[Dict]:
     return experiments
 
 
+def _case_output_dir(output_dir: str, m: int, p: int, n: int,
+                     target_rank: int) -> str:
+    return os.path.join(output_dir, f"{m}_{p}_{n}_rank{target_rank}")
+
+
+def _build_best_attempt_info(m: int, p: int, n: int,
+                             best: DecompositionResult) -> Dict:
+    """Summarize the best continuous attempt for experiment_log.json."""
+    T = build_mult_tensor(m, p, n)
+    t_norm_sq = float(np.sum(T ** 2))
+    info = {
+        'recon_error': float(best.reconstruction_error),
+        'recon_error_rel': (
+            float(best.reconstruction_error / t_norm_sq) if t_norm_sq > 0 else 0.0
+        ),
+        'is_exact': bool(best.is_exact),
+        'method': best.method,
+        'field': best.field,
+    }
+    if best.field == 'R':
+        U_r = np.round(best.U)
+        V_r = np.round(best.V)
+        W_r = np.round(best.W)
+        n_wrong, n_total = wrong_entries(T, U_r, V_r, W_r)
+        info['rounded_n_wrong_entries'] = n_wrong
+        info['rounded_total_entries'] = n_total
+        info['rounded_pct_correct'] = 100.0 * (1 - n_wrong / n_total)
+    else:
+        n_wrong, n_total = wrong_entries(T, best.U, best.V, best.W)
+        info['n_wrong_entries'] = n_wrong
+        info['total_entries'] = n_total
+        info['pct_correct'] = 100.0 * (1 - n_wrong / n_total)
+        info['max_coefficient'] = int(best.max_coefficient)
+        info['num_additions'] = int(best.num_additions)
+    return info
+
+
+def _save_best_attempt(save_path: str, best: DecompositionResult) -> str:
+    """Persist the best U,V,W (continuous by default) and recon loss."""
+    os.makedirs(save_path, exist_ok=True)
+    filename = 'best_attempt.npz'
+    filepath = os.path.join(save_path, filename)
+    np.savez(
+        filepath,
+        U=best.U,
+        V=best.V,
+        W=best.W,
+        reconstruction_error=float(best.reconstruction_error),
+        field=best.field,
+        method=best.method,
+        m=best.m,
+        p=best.p,
+        n=best.n,
+        rank=best.rank,
+    )
+    return filename
+
+
 def run_single_experiment(m: int, p: int, n: int, target_rank: int,
-                           config: Dict):
+                           config: Dict
+                           ) -> Tuple[List[DecompositionResult],
+                                      Optional[DecompositionResult]]:
     """Run all methods on a single case.
 
-    Returns (verified_results, near_miss_info) where near_miss_info is a dict
-    with reconstruction-error diagnostics from the best non-exact attempt
-    (useful for deciding whether flip-graph search is viable).
+    Returns (verified_results, best_attempt) where best_attempt is the
+    lowest Frobenius reconstruction loss seen on continuous factors.
     """
     all_results = []
-    best_near_miss = None
+    best_attempt = None
+    integer_penalties = config.get('integer_penalties', False)
 
     # Method 1: Gradient search
     try:
         import torch
         searcher = ContinuousSearch(m, p, n, device=config.get('device', 'cpu'))
-        grad_results, grad_near_miss = searcher.search(
+        grad_results, grad_best = searcher.search(
             R=target_rank,
             n_restarts=config['gradient_restarts'],
             n_steps=config['gradient_steps'],
-            verbose=False
+            verbose=False,
+            integer_penalties=integer_penalties,
         )
         all_results.extend(grad_results)
-        if grad_near_miss is not None:
-            if (best_near_miss is None
-                    or grad_near_miss.reconstruction_error
-                    < best_near_miss.reconstruction_error):
-                best_near_miss = grad_near_miss
+        if grad_best is not None:
+            if (best_attempt is None
+                    or grad_best.reconstruction_error
+                    < best_attempt.reconstruction_error):
+                best_attempt = grad_best
     except ImportError:
         pass
 
-    # Verify all results
     verified = []
     for r in all_results:
         report = verify_all(r)
         if report['verified']:
             verified.append(r)
-
-    # Build near-miss diagnostics
-    near_miss_info = None
-    if best_near_miss is not None and not best_near_miss.is_exact:
-        T = build_mult_tensor(m, p, n)
-        n_wrong, n_total = wrong_entries(T, best_near_miss.U, best_near_miss.V,
-                                         best_near_miss.W)
-        near_miss_info = {
-            'recon_error': float(best_near_miss.reconstruction_error),
-            'n_wrong_entries': n_wrong,
-            'total_entries': n_total,
-            'pct_correct': 100.0 * (1 - n_wrong / n_total),
-            'flip_graph_candidate': n_wrong <= max(3, int(0.1 * n_total)),
-        }
-
-    return verified, near_miss_info
+    return verified, best_attempt
 
 
 def batch_run(config: Dict = None):
@@ -164,6 +214,7 @@ def batch_run(config: Dict = None):
             'gradient_restarts': 300,
             'gradient_steps': 25000,
             'gradient_lr': 0.003,
+            'integer_penalties': False,
             'ff_attempts': 1000000,
             'primes': [2, 3, 5],
             'device': 'cuda' if __import__('torch').cuda.is_available() else 'cpu',
@@ -204,7 +255,7 @@ def batch_run(config: Dict = None):
         print(f"[{i+1}/{len(experiments)}] <{m},{p},{n}> rank {target_rank} ({purpose})")
 
         t_start = time.time()
-        results, near_miss_info = run_single_experiment(m, p, n, target_rank, config)
+        results, best_attempt = run_single_experiment(m, p, n, target_rank, config)
         elapsed = time.time() - t_start
 
         entry = {
@@ -216,14 +267,21 @@ def batch_run(config: Dict = None):
             'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
         }
 
+        save_path = _case_output_dir(config['output_dir'], m, p, n, target_rank)
+
+        if best_attempt is not None:
+            attempt_info = _build_best_attempt_info(m, p, n, best_attempt)
+            entry['best_loss'] = attempt_info['recon_error']
+            entry['best_attempt'] = attempt_info
+            attempt_file = _save_best_attempt(save_path, best_attempt)
+            entry['best_attempt_file'] = attempt_file
+
         if results:
             best = min(results, key=lambda r: (r.max_coefficient, r.num_additions))
             entry['best_max_coeff'] = int(best.max_coefficient)
             entry['best_additions'] = int(best.num_additions)
             entry['best_method'] = best.method
 
-            save_path = os.path.join(config['output_dir'],
-                                      f"{m}_{p}_{n}_rank{target_rank}")
             os.makedirs(save_path, exist_ok=True)
 
             for j, r in enumerate(results):
@@ -239,14 +297,17 @@ def batch_run(config: Dict = None):
                   f"[best: max_coeff={best.max_coefficient}, "
                   f"method={best.method}]")
         else:
-            if near_miss_info is not None:
-                entry['near_miss'] = near_miss_info
-                nm = near_miss_info
-                tag = " *** FLIP-GRAPH CANDIDATE ***" if nm['flip_graph_candidate'] else ""
-                print(f"  No exact solution in {elapsed:.1f}s  |  "
-                      f"near-miss: {nm['n_wrong_entries']}/{nm['total_entries']} "
-                      f"wrong ({nm['pct_correct']:.1f}% correct), "
-                      f"max_err={nm['recon_error']:.4f}{tag}")
+            if best_attempt is not None:
+                ba = entry['best_attempt']
+                rel = ba.get('recon_error_rel')
+                rel_str = f", rel={rel:.3g}" if rel is not None else ""
+                print(f"  No verified exact solution in {elapsed:.1f}s  |  "
+                      f"best loss={entry['best_loss']:.6g}{rel_str}")
+                if 'rounded_n_wrong_entries' in ba:
+                    print(f"  (if rounded: {ba['rounded_n_wrong_entries']}/"
+                          f"{ba['rounded_total_entries']} wrong, "
+                          f"{ba['rounded_pct_correct']:.1f}% correct)")
+                print(f"  Saved best attempt -> {save_path}/{entry['best_attempt_file']}")
             else:
                 print(f"  No solutions in {elapsed:.1f}s")
 
@@ -273,17 +334,6 @@ def batch_run(config: Dict = None):
             print(f"    <{e['case'][0]},{e['case'][1]},{e['case'][2]}> "
                   f"rank {e['target_rank']}")
 
-    flip_candidates = [e for e in log
-                       if e.get('near_miss', {}).get('flip_graph_candidate')]
-    if flip_candidates:
-        print(f"\n  FLIP-GRAPH CANDIDATES ({len(flip_candidates)}):")
-        for e in flip_candidates:
-            nm = e['near_miss']
-            print(f"    <{e['case'][0]},{e['case'][1]},{e['case'][2]}> "
-                  f"rank {e['target_rank']}  "
-                  f"{nm['n_wrong_entries']}/{nm['total_entries']} wrong "
-                  f"({nm['pct_correct']:.1f}% correct)")
-
     return log
 
 
@@ -292,10 +342,19 @@ if __name__ == "__main__":
         config = {
             'gradient_restarts': 30,
             'gradient_steps': 8000,
+            'integer_penalties': False,
             'ff_attempts': 200000,
             'primes': [2, 3],
             'device': 'cpu',
             'output_dir': 'quick_results',
+        }
+    elif '--integer' in sys.argv:
+        config = {
+            'gradient_restarts': 300,
+            'gradient_steps': 25000,
+            'integer_penalties': True,
+            'device': 'cuda' if __import__('torch').cuda.is_available() else 'cpu',
+            'output_dir': 'batch_results',
         }
     else:
         config = None  # use defaults

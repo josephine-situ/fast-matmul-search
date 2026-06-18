@@ -106,8 +106,15 @@ def wrong_entries(T: np.ndarray, U: np.ndarray, V: np.ndarray,
     return int((diff > 0.5).sum()), int(T.size)
 
 
+def frobenius_loss(T: np.ndarray, U: np.ndarray, V: np.ndarray,
+                   W: np.ndarray) -> float:
+    """Squared Frobenius norm ||T - Σ u_r ⊗ v_r ⊗ w_r||²."""
+    T_recon = np.einsum('ir,jr,kr->ijk', U, V, W)
+    return float(np.sum((T - T_recon) ** 2))
+
+
 def make_result(U, V, W, m, p, n, method, field) -> DecompositionResult:
-    """Package arrays into a DecompositionResult."""
+    """Package rounded integer arrays into a DecompositionResult."""
     T = build_mult_tensor(m, p, n)
     U_int = np.round(U).astype(np.int64)
     V_int = np.round(V).astype(np.int64)
@@ -126,6 +133,26 @@ def make_result(U, V, W, m, p, n, method, field) -> DecompositionResult:
         max_coefficient=max(np.max(np.abs(U_int)), np.max(np.abs(V_int)), 
                            np.max(np.abs(W_int))),
         num_additions=count_additions(U_int, V_int, W_int)
+    )
+
+
+def make_continuous_result(U, V, W, m, p, n, method,
+                           field: str = 'R') -> DecompositionResult:
+    """Package pre-rounded (continuous) factors with Frobenius recon loss."""
+    T = build_mult_tensor(m, p, n)
+    U_f = np.asarray(U, dtype=np.float64)
+    V_f = np.asarray(V, dtype=np.float64)
+    W_f = np.asarray(W, dtype=np.float64)
+    error = frobenius_loss(T, U_f, V_f, W_f)
+    return DecompositionResult(
+        U=U_f, V=V_f, W=W_f,
+        rank=U_f.shape[1],
+        reconstruction_error=error,
+        m=m, p=p, n=n,
+        method=method, field=field,
+        max_coefficient=int(max(np.max(np.abs(U_f)), np.max(np.abs(V_f)),
+                              np.max(np.abs(W_f)))),
+        num_additions=0,
     )
 
 

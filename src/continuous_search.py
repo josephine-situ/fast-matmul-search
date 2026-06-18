@@ -1,15 +1,13 @@
 """
 Continuous optimization search for tensor decompositions.
 
-The core idea: express the decomposition problem as minimizing
-    ||T - Σ_r u_r ⊗ v_r ⊗ w_r||²
-with regularization that encourages integer solutions.
+Minimizes ||T - Σ_r u_r ⊗ v_r ⊗ w_r||² over real factors U,V,W.
 
-Key design decisions:
-  - Phase 1: pure reconstruction (find the right basin)
-  - Phase 2: staged integrality + sparsity penalties (crystallize to integers)
-  - Multiple random restarts (the landscape is highly non-convex)
-  - Track ALL solutions found (different decompositions have different properties)
+Batch experiments (run_experiments.py) default to integer_penalties=False:
+pure reconstruction loss, continuous best-iterate tracking, no rounding.
+
+Pipeline / Strassen validation still use integer_penalties=True (default on
+search()) with staged integrality penalties and rounded exact detection.
 """
 
 import numpy as np
@@ -17,7 +15,8 @@ import torch
 import torch.nn.functional as F
 from typing import Dict, List, Optional, Tuple
 from tensor_utils import (build_mult_tensor, verify_decomposition,
-                           make_result, DecompositionResult)
+                           make_result, make_continuous_result,
+                           DecompositionResult)
 import time
 
 
@@ -188,13 +187,44 @@ class ContinuousSearch:
                ((nw / gmean - 1) ** 2).sum()
         return loss
     
+    def _batched_training_loss(self, U, V, W, step: int, n_steps: int,
+                               integer_penalties: bool):
+        recon = self._recon_loss_batched(U, V, W)
+        if not integer_penalties:
+            return recon + 0.01 * self._balance_loss_batched(U, V, W)
+
+        phase1_end = int(n_steps * 0.4)
+        phase2_end = int(n_steps * 0.7)
+        loss_batch = recon.clone()
+        if step < phase1_end:
+            loss_batch += 0.01 * self._balance_loss_batched(U, V, W)
+        elif step < phase2_end:
+            t = (step - phase1_end) / (phase2_end - phase1_end)
+            int_w = 0.3 * t ** 2
+            sparse_w = 0.05 * t
+            mag_w = 0.1 * t
+            loss_batch += (int_w * self._integrality_loss_batched(U, V, W) +
+                           sparse_w * self._sparsity_loss_batched(U, V, W) +
+                           mag_w * self._magnitude_loss_batched(U, V, W) +
+                           0.01 * self._balance_loss_batched(U, V, W))
+        else:
+            t = (step - phase2_end) / (n_steps - phase2_end)
+            int_w = 0.3 + 2.0 * t
+            sparse_w = 0.05 + 0.2 * t
+            mag_w = 0.1 + 0.5 * t
+            loss_batch += (int_w * self._integrality_loss_batched(U, V, W) +
+                           sparse_w * self._sparsity_loss_batched(U, V, W) +
+                           mag_w * self._magnitude_loss_batched(U, V, W))
+        return loss_batch
+
     def search_batched(self, R: int, B: int, n_steps: int = 20000,
-                       lr: float = 0.003, verbose: bool = False
+                       lr: float = 0.003, verbose: bool = False,
+                       integer_penalties: bool = True
                        ) -> Tuple[List[DecompositionResult], Optional[DecompositionResult]]:
         """
         Batched optimization run solving B restarts simultaneously.
-        Returns (exact_results, best_near_miss) where best_near_miss is the
-        closest non-exact rounded solution across the batch.
+        Returns (exact_results, best_attempt) where best_attempt uses rounded
+        factors when integer_penalties=True and continuous factors otherwise.
         """
         # We manually initialize batch. We can vary initialization method per batch element.
         U = torch.zeros(B, self.d1, R, dtype=torch.float64, device=self.device)
@@ -216,105 +246,98 @@ class ContinuousSearch:
         scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
             optimizer, T_0=n_steps // 4, T_mult=1, eta_min=lr * 0.01
         )
-        
-        phase1_end = int(n_steps * 0.4)
-        phase2_end = int(n_steps * 0.7)
-        
-        best_rounded_error = torch.full((B,), float('inf'), device=self.device, dtype=torch.float64)
+
+        best_track_error = torch.full(
+            (B,), float('inf'), device=self.device, dtype=torch.float64)
         best_U = U.detach().clone()
         best_V = V.detach().clone()
         best_W = W.detach().clone()
-        
+
         exact_masks = torch.zeros(B, dtype=torch.bool, device=self.device)
         results = []
-        
+
         for step in range(n_steps):
-            if exact_masks.all():
-                break # All found
-            
+            if integer_penalties and exact_masks.all():
+                break
+
             optimizer.zero_grad()
-            
-            recon = self._recon_loss_batched(U, V, W)
-            loss_batch = recon.clone()
-            
-            if step < phase1_end:
-                loss_batch += 0.01 * self._balance_loss_batched(U, V, W)
-            elif step < phase2_end:
-                t = (step - phase1_end) / (phase2_end - phase1_end)
-                int_w = 0.3 * t ** 2
-                sparse_w = 0.05 * t
-                mag_w = 0.1 * t
-                loss_batch += (int_w * self._integrality_loss_batched(U, V, W) +
-                               sparse_w * self._sparsity_loss_batched(U, V, W) +
-                               mag_w * self._magnitude_loss_batched(U, V, W) +
-                               0.01 * self._balance_loss_batched(U, V, W))
+            loss_batch = self._batched_training_loss(
+                U, V, W, step, n_steps, integer_penalties)
+
+            if integer_penalties:
+                loss = (loss_batch * (~exact_masks)).sum()
             else:
-                t = (step - phase2_end) / (n_steps - phase2_end)
-                int_w = 0.3 + 2.0 * t
-                sparse_w = 0.05 + 0.2 * t
-                mag_w = 0.1 + 0.5 * t
-                loss_batch += (int_w * self._integrality_loss_batched(U, V, W) +
-                               sparse_w * self._sparsity_loss_batched(U, V, W) +
-                               mag_w * self._magnitude_loss_batched(U, V, W))
-            
-            # Mask out already converged gradients
-            loss = (loss_batch * (~exact_masks)).sum()
+                loss = loss_batch.sum()
+
             if loss > 0:
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_([U, V, W], max_norm=5.0)
                 optimizer.step()
                 scheduler.step()
-            
+
             if step % 1000 == 0 or step == n_steps - 1:
                 with torch.no_grad():
-                    U_r = torch.round(U)
-                    V_r = torch.round(V)
-                    W_r = torch.round(W)
-                    rounded_errs = self._recon_loss_batched(U_r, V_r, W_r)
-                    
-                    improved = rounded_errs < best_rounded_error
+                    if integer_penalties:
+                        U_r = torch.round(U)
+                        V_r = torch.round(V)
+                        W_r = torch.round(W)
+                        track_errs = self._recon_loss_batched(U_r, V_r, W_r)
+                        track_U, track_V, track_W = U_r, V_r, W_r
+                    else:
+                        track_errs = self._recon_loss_batched(U, V, W)
+                        track_U, track_V, track_W = U, V, W
+
+                    improved = track_errs < best_track_error
                     if improved.any():
-                        best_rounded_error[improved] = rounded_errs[improved]
-                        best_U[improved] = U_r[improved].detach()
-                        best_V[improved] = V_r[improved].detach()
-                        best_W[improved] = W_r[improved].detach()
-                    
-                    newly_exact = (best_rounded_error < 1e-10) & (~exact_masks)
-                    if newly_exact.any():
-                        idx = newly_exact.nonzero(as_tuple=True)[0]
-                        for i in idx.tolist():
-                            if verbose:
-                                print(f"  EXACT in batch element {i} at step {step}!")
-                            results.append(make_result(best_U[i].cpu().numpy(), 
-                                                       best_V[i].cpu().numpy(), 
-                                                       best_W[i].cpu().numpy(),
-                                                       self.m, self.p, self.n,
-                                                       'gradient', 'Z'))
-                        exact_masks |= newly_exact
-                        
-        # Now try to snap and refine those that are close but not exact
-        not_exact = (~exact_masks).nonzero(as_tuple=True)[0].tolist()
-        for b in not_exact:
-            result = self._snap_and_refine(U[b].detach(), V[b].detach(), W[b].detach())
-            if result is not None:
-                results.append(result)
-            elif best_rounded_error[b] < 1e-10:
-                results.append(make_result(best_U[b].cpu().numpy(), 
-                                           best_V[b].cpu().numpy(), 
-                                           best_W[b].cpu().numpy(),
-                                           self.m, self.p, self.n,
-                                           'gradient', 'Z'))
+                        best_track_error[improved] = track_errs[improved]
+                        best_U[improved] = track_U[improved].detach()
+                        best_V[improved] = track_V[improved].detach()
+                        best_W[improved] = track_W[improved].detach()
 
-        # Build near-miss from the batch element with lowest rounded error
+                    if integer_penalties:
+                        newly_exact = (best_track_error < 1e-10) & (~exact_masks)
+                        if newly_exact.any():
+                            idx = newly_exact.nonzero(as_tuple=True)[0]
+                            for i in idx.tolist():
+                                if verbose:
+                                    print(f"  EXACT in batch element {i} at step {step}!")
+                                results.append(make_result(
+                                    best_U[i].cpu().numpy(),
+                                    best_V[i].cpu().numpy(),
+                                    best_W[i].cpu().numpy(),
+                                    self.m, self.p, self.n, 'gradient', 'Z'))
+                            exact_masks |= newly_exact
+
+        if integer_penalties:
+            not_exact = (~exact_masks).nonzero(as_tuple=True)[0].tolist()
+            for b in not_exact:
+                result = self._snap_and_refine(
+                    U[b].detach(), V[b].detach(), W[b].detach())
+                if result is not None:
+                    results.append(result)
+                elif best_track_error[b] < 1e-10:
+                    results.append(make_result(
+                        best_U[b].cpu().numpy(),
+                        best_V[b].cpu().numpy(),
+                        best_W[b].cpu().numpy(),
+                        self.m, self.p, self.n, 'gradient', 'Z'))
+
         with torch.no_grad():
-            best_idx = best_rounded_error.argmin().item()
-            near_miss = make_result(
-                best_U[best_idx].cpu().numpy(),
-                best_V[best_idx].cpu().numpy(),
-                best_W[best_idx].cpu().numpy(),
-                self.m, self.p, self.n, 'gradient', 'Z')
+            best_idx = best_track_error.argmin().item()
+            if integer_penalties:
+                best_attempt = make_result(
+                    best_U[best_idx].cpu().numpy(),
+                    best_V[best_idx].cpu().numpy(),
+                    best_W[best_idx].cpu().numpy(),
+                    self.m, self.p, self.n, 'gradient', 'Z')
+            else:
+                best_attempt = make_continuous_result(
+                    best_U[best_idx].cpu().numpy(),
+                    best_V[best_idx].cpu().numpy(),
+                    best_W[best_idx].cpu().numpy(),
+                    self.m, self.p, self.n, 'gradient')
 
-        return results, near_miss
+        return results, best_attempt
 
     def search_single(self, R: int, n_steps: int = 20000,
                        lr: float = 0.003, init_method: str = 'gaussian',
@@ -511,20 +534,22 @@ class ContinuousSearch:
         return None
     
     def search(self, R: int, n_restarts: int = 200, n_steps: int = 20000,
-               lr: float = 0.003, verbose: bool = True
+               lr: float = 0.003, verbose: bool = True,
+               integer_penalties: bool = True
                ) -> Tuple[List[DecompositionResult], Optional[DecompositionResult]]:
         """
         Main search: run many random restarts in batches.
-        Returns (exact_results, best_near_miss) where best_near_miss is the
-        closest non-exact rounded solution seen across all restarts.
+        Returns (exact_results, best_attempt). With integer_penalties=False,
+        best_attempt keeps continuous factors and Frobenius recon loss.
         """
         results = []
-        best_near_miss: Optional[DecompositionResult] = None
+        best_attempt: Optional[DecompositionResult] = None
         batch_size = min(30, n_restarts)
         
         if verbose:
+            mode = "integer-crystallize" if integer_penalties else "continuous"
             print(f"\nSearching for <{self.m},{self.p},{self.n}> "
-                  f"rank-{R} decomposition")
+                  f"rank-{R} decomposition [{mode}]")
             print(f"  Tensor shape: {self.T.shape}")
             print(f"  Standard rank: {self.m * self.p * self.n}")
             print(f"  Restarts: {n_restarts}, Steps/restart: {n_steps}, Batch Size: {batch_size}")
@@ -536,15 +561,16 @@ class ContinuousSearch:
         while restarts_done < n_restarts:
             B = min(batch_size, n_restarts - restarts_done)
             
-            batched_results, batch_near_miss = self.search_batched(
-                R, B=B, n_steps=n_steps, lr=lr, verbose=False
+            batched_results, batch_best = self.search_batched(
+                R, B=B, n_steps=n_steps, lr=lr, verbose=False,
+                integer_penalties=integer_penalties,
             )
             
-            if batch_near_miss is not None:
-                if (best_near_miss is None
-                        or batch_near_miss.reconstruction_error
-                        < best_near_miss.reconstruction_error):
-                    best_near_miss = batch_near_miss
+            if batch_best is not None:
+                if (best_attempt is None
+                        or batch_best.reconstruction_error
+                        < best_attempt.reconstruction_error):
+                    best_attempt = batch_best
 
             for res in batched_results:
                 if res.is_exact:
@@ -564,10 +590,10 @@ class ContinuousSearch:
         if verbose:
             print(f"\nCompleted in {elapsed:.1f}s. "
                   f"Total exact solutions found: {len(results)}")
-            if not results and best_near_miss is not None:
-                print(f"  Best near-miss error: {best_near_miss.reconstruction_error:.6f}")
+            if best_attempt is not None:
+                print(f"  Best loss: {best_attempt.reconstruction_error:.6g}")
             
-        return results, best_near_miss
+        return results, best_attempt
 
 
 class ALSSearch:
