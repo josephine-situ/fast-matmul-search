@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 from pathlib import Path
 
@@ -74,6 +75,11 @@ def main_certify(argv=None):
     ap.add_argument("--dry-run", action="store_true",
                     help="build the problem and report sizes without "
                          "solving - use to dimension cluster jobs")
+    ap.add_argument("--threads", type=int,
+                    default=int(os.environ.get("SLURM_CPUS_PER_TASK", 0)),
+                    help="MOSEK thread cap (default: SLURM_CPUS_PER_TASK "
+                         "if set, else all cores; MOSEK sees physical "
+                         "cores, not the cgroup limit)")
     ap.add_argument("--verbose", action="store_true")
     ap.add_argument("--out", type=Path, default=None)
     args = ap.parse_args(argv)
@@ -133,6 +139,7 @@ def main_certify(argv=None):
         compute_upper=not args.no_upper,
         method=args.method,
         cp_options=cp_options,
+        threads=args.threads,
         # cutting-plane runs are long: always show iteration progress
         verbose=args.verbose or args.method == "cutting-plane",
     )

@@ -90,6 +90,7 @@ def certify_box_minimum(
     extra_cuts: list | None = None,
     method: str = "dual",
     cp_options: dict | None = None,
+    threads: int = 0,
     verbose: bool = False,
 ) -> CertifyResult:
     """Certified lower bound for min p(x) over x in [-box, box]^n.
@@ -178,15 +179,18 @@ def certify_box_minimum(
             raise ValueError("cutting-plane mode requires solver='MOSEK'")
         from polyopt.cutting_plane import solve_cutting_plane
 
+        cp_kwargs = dict(cp_options or {})
+        cp_kwargs.setdefault("threads", threads)
         sol = solve_cutting_plane(
             data, top_lmi=top_lmi, extra_ineq=extra_ineq,
-            verbose=verbose, **(cp_options or {}),
+            verbose=verbose, **cp_kwargs,
         )
     elif use_mosek:
         from polyopt.mosek_backend import solve_relaxation_mosek
 
         sol = solve_relaxation_mosek(
-            data, top_lmi=top_lmi, verbose=verbose, extra_ineq=extra_ineq
+            data, top_lmi=top_lmi, verbose=verbose, extra_ineq=extra_ineq,
+            threads=threads,
         )
     else:
         sol = solve_relaxation_cvxpy(
