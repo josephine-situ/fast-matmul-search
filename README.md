@@ -65,9 +65,17 @@ python -c "import mosek; mosek.Env().checkoutlicense(mosek.feature.pton); print(
 Then submit (flags pass through to `polyopt-certify`):
 
 ```bash
-sbatch scripts/submit_polyopt.sbatch --case karatsuba --rank 2 --method cutting-plane
-sbatch scripts/submit_polyopt.sbatch --case 2,2,2 --rank 6 --method cutting-plane --cp-max-iters 100
+# family-richness ladder for the rank-2 Karatsuba certificate:
+sbatch scripts/submit_polyopt.sbatch --case karatsuba --rank 2 --method dual --supp full
+sbatch scripts/submit_polyopt.sbatch --case karatsuba --rank 2 --method dual --family full
+# memory-light adversarial mode for cases whose dual SDP does not fit:
+sbatch scripts/submit_polyopt.sbatch --case 2,2,2 --rank 6 --method cutting-plane --cp-max-iters 300
 ```
+
+`--family support` (default) draws multiplier pairs from the loss monomials
+and scales; `--family full` is every (I,J) pair of order degree-2 - the
+strongest known bounds at O(n^4) pairs. `--supp full` widens each pair's
+quadratic support from the originating monomial's variables to all n.
 
 Results land in `results/certificates/<jobid>.json`; logs in `logs/`.
 If no MOSEK license is available, `--solver CLARABEL --method dual` runs

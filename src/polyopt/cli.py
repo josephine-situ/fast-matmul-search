@@ -30,7 +30,11 @@ def _build_case(case: str, rank: int):
 
 def main_certify(argv=None):
     from polyopt.certify import certify_box_minimum
-    from polyopt.multipliers import support_driven_family
+    from polyopt.multipliers import (
+        MultiplierPair,
+        full_family,
+        support_driven_family,
+    )
 
     ap = argparse.ArgumentParser(
         description="Certified lower bound for a tensor decomposition loss"
@@ -53,6 +57,17 @@ def main_certify(argv=None):
     ap.add_argument("--max-flips", type=int, default=None,
                     help="cap complement flips in the multiplier family "
                          "(default: all flips - needed for strong bounds)")
+    ap.add_argument("--family", choices=["support", "full"],
+                    default="support",
+                    help="'support': pairs drawn from the loss monomials "
+                         "(scalable); 'full': every (I,J) pair of order "
+                         "degree-2 (strongest known bounds, O(n^4) pairs "
+                         "- cluster-sized memory)")
+    ap.add_argument("--supp", choices=["monomial", "full"],
+                    default="monomial",
+                    help="quadratic support per pair: variables of the "
+                         "originating monomial, or all n variables "
+                         "(wider = tighter and much more memory)")
     ap.add_argument("--no-slater", action="store_true",
                     help="skip the strict-feasibility check (not recommended)")
     ap.add_argument("--no-upper", action="store_true")
@@ -64,11 +79,23 @@ def main_certify(argv=None):
     print(f"case {name}: {var.n_vars} variables, "
           f"{len(poly)} monomials, degree {poly.degree}")
 
-    pairs = support_driven_family(
-        list(poly.coeffs.keys()), complement_splits=True,
-        max_flips=args.max_flips,
-    )
-    print(f"multiplier family: {len(pairs)} pairs")
+    if args.family == "full":
+        pairs = full_family(var.n_vars, max(poly.degree - 2, 0))
+    else:
+        pairs = support_driven_family(
+            list(poly.coeffs.keys()), complement_splits=True,
+            max_flips=args.max_flips,
+        )
+        if args.supp == "full":
+            full_supp = tuple(range(var.n_vars))
+            pairs = [
+                MultiplierPair(I, J, full_supp)
+                for (I, J) in sorted({(p.I, p.J) for p in pairs})
+            ]
+    max_supp = max(len(t.supp) for t in pairs)
+    print(f"multiplier family: {args.family}/{args.supp}, "
+          f"{len(pairs)} pairs, max support {max_supp} "
+          f"(largest LMI {max_supp + 1}x{max_supp + 1})")
 
     t0 = time.time()
     res = certify_box_minimum(
@@ -102,6 +129,7 @@ def main_certify(argv=None):
             "n_pairs": res.n_pairs, "n_lambda": res.n_lambda,
             "n_moments": res.n_moments, "times": res.times,
             "solver": args.solver, "method": args.method,
+            "family": args.family, "supp": args.supp,
             "max_flips": args.max_flips,
         }, indent=2))
         print(f"wrote {args.out}")
