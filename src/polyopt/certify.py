@@ -1,0 +1,155 @@
+"""Root-node certification driver.
+
+Pipeline: polynomial over [-B, B]^n  ->  shift to [0,1]^n  ->  multiplier
+family  ->  (optional) strict-feasibility check  ->  dual best-SLC SDP  ->
+certified lower bound. The bound is invariant under the reparametrization,
+so it applies directly to the original box.
+"""
+
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass, field
+
+import numpy as np
+
+from polyopt.multipliers import MultiplierPair, full_family
+from polyopt.relaxation import build_relaxation, solve_relaxation_cvxpy
+from polyopt.slc_constraints import build_matching, feasibility_check
+from polyopt.sparse_poly import SparsePolynomial
+from polyopt.upper_bounds import candidate_points, multistart_upper_bound
+
+
+@dataclass
+class CertifyResult:
+    bound: float | None            # certified lower bound of p over the box
+    status: str
+    slater_gamma: float | None     # strict-feasibility margin (None = skipped)
+    upper_bound: float | None
+    n_pairs: int
+    n_lambda: int
+    n_moments: int
+    times: dict = field(default_factory=dict)
+    x_box: np.ndarray | None = None   # relaxation first moment, original coords
+
+    @property
+    def gap(self) -> float | None:
+        if self.bound is None or self.upper_bound is None:
+            return None
+        return self.upper_bound - self.bound
+
+
+def certify_box_minimum(
+    poly: SparsePolynomial,
+    n_vars: int,
+    box: float = 1.0,
+    pairs: list[MultiplierPair] | None = None,
+    check_slater: bool = True,
+    compute_upper: bool = True,
+    solver: str = "CLARABEL",
+    top_lmi: bool = True,
+    sym_box: bool = False,
+    extra_cuts: list | None = None,
+    verbose: bool = False,
+) -> CertifyResult:
+    """Certified lower bound for min p(x) over x in [-box, box]^n.
+
+    `poly` is expressed in the original coordinates. If `pairs` is None the
+    full family of order (degree - 2) is used - only viable for small n.
+    With sym_box=True the engine works natively on [-1,1]^n with
+    multipliers (1+y_i), (1-y_j) - this preserves the polynomial's sign
+    structure (no coefficient explosion from shifting), which matters for
+    restricted families on structured polynomials.
+    """
+    times: dict[str, float] = {}
+    t0 = time.perf_counter()
+    if sym_box:
+        shifted = poly.substitute_affine(box, 0.0)      # q(y) = p(B y)
+        lo, hi = -1.0, 1.0
+    else:
+        shifted = poly.substitute_affine(2.0 * box, -box)  # q(y) = p(2B y - B)
+        lo, hi = 0.0, 1.0
+    times["shift"] = time.perf_counter() - t0
+
+    degree = shifted.degree
+    if pairs is None:
+        pairs = full_family(n_vars, max(degree - 2, 0))
+
+    t0 = time.perf_counter()
+    matching = build_matching(pairs, shifted, sym_box=sym_box)
+    times["matching"] = time.perf_counter() - t0
+
+    use_mosek = solver.upper() == "MOSEK"
+    gamma = None
+    if check_slater:
+        t0 = time.perf_counter()
+        if use_mosek:
+            from polyopt.mosek_backend import feasibility_check_mosek
+
+            gamma = feasibility_check_mosek(matching)
+        else:
+            gamma, _ = feasibility_check(matching, solver=solver)
+        times["slater"] = time.perf_counter() - t0
+        if not np.isfinite(gamma) or gamma <= 0:
+            return CertifyResult(
+                bound=None,
+                status=f"slater_failed (gamma={gamma})",
+                slater_gamma=gamma,
+                upper_bound=None,
+                n_pairs=len(pairs),
+                n_lambda=matching.n_constraints,
+                n_moments=0,
+                times=times,
+            )
+
+    t0 = time.perf_counter()
+    data = build_relaxation(matching, n_vars, top_lmi=top_lmi)
+    times["assemble"] = time.perf_counter() - t0
+
+    extra_ineq = None
+    if extra_cuts:
+        from polyopt.symmetry import cuts_to_rows
+
+        extra_ineq = cuts_to_rows(extra_cuts, data.moments)
+
+    t0 = time.perf_counter()
+    if use_mosek:
+        from polyopt.mosek_backend import solve_relaxation_mosek
+
+        sol = solve_relaxation_mosek(
+            data, top_lmi=top_lmi, verbose=verbose, extra_ineq=extra_ineq
+        )
+    else:
+        sol = solve_relaxation_cvxpy(
+            data, solver=solver, top_lmi=top_lmi, verbose=verbose,
+            extra_ineq=extra_ineq,
+        )
+    times["solve"] = time.perf_counter() - t0
+
+    upper = None
+    x_box = None
+    if compute_upper:
+        t0 = time.perf_counter()
+        x0_list = []
+        if "x" in sol and "X" in sol:
+            x0_list = candidate_points(sol["x"], sol["X"])
+        upper, y_best = multistart_upper_bound(
+            shifted, n_vars, lo, hi, x0_list=x0_list
+        )
+        times["upper"] = time.perf_counter() - t0
+        if y_best is not None:
+            x_box = box * y_best if sym_box else 2.0 * box * y_best - box
+    elif "x" in sol:
+        x_box = box * sol["x"] if sym_box else 2.0 * box * sol["x"] - box
+
+    return CertifyResult(
+        bound=sol["bound"],
+        status=sol["status"],
+        slater_gamma=gamma,
+        upper_bound=upper,
+        n_pairs=len(pairs),
+        n_lambda=matching.n_constraints,
+        n_moments=sol["n_moments"],
+        times=times,
+        x_box=x_box,
+    )
