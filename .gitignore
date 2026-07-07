@@ -7,3 +7,5 @@ venv/
 results/*
 !results/.gitkeep
 !results/summary.json
+*.egg-info/
+quick_results/
