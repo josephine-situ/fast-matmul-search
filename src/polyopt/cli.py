@@ -71,6 +71,9 @@ def main_certify(argv=None):
     ap.add_argument("--no-slater", action="store_true",
                     help="skip the strict-feasibility check (not recommended)")
     ap.add_argument("--no-upper", action="store_true")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="build the problem and report sizes without "
+                         "solving - use to dimension cluster jobs")
     ap.add_argument("--verbose", action="store_true")
     ap.add_argument("--out", type=Path, default=None)
     args = ap.parse_args(argv)
@@ -97,6 +100,31 @@ def main_certify(argv=None):
           f"{len(pairs)} pairs, max support {max_supp} "
           f"(largest LMI {max_supp + 1}x{max_supp + 1})")
 
+    if args.dry_run:
+        from polyopt.certify import estimate_problem_size
+
+        est = estimate_problem_size(
+            poly, var.n_vars, pairs, box=args.box, sym_box=True
+        )
+        print("dry run - problem sizes (no solve):")
+        for k, v in est.items():
+            print(f"  {k}: {v}")
+        if args.out:
+            args.out.parent.mkdir(parents=True, exist_ok=True)
+            args.out.write_text(json.dumps(
+                {"case": name, "rank": args.rank, "dry_run": True, **est},
+                indent=2))
+            print(f"wrote {args.out}")
+        return
+
+    cp_options = {"max_iters": args.cp_max_iters, "tol": args.cp_tol,
+                  "rho": args.cp_rho}
+    if args.out:
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        cp_options["checkpoint_path"] = str(
+            args.out.with_suffix(".progress.json")
+        )
+
     t0 = time.time()
     res = certify_box_minimum(
         poly, n_vars=var.n_vars, box=args.box, pairs=pairs,
@@ -104,9 +132,9 @@ def main_certify(argv=None):
         check_slater=not args.no_slater,
         compute_upper=not args.no_upper,
         method=args.method,
-        cp_options={"max_iters": args.cp_max_iters, "tol": args.cp_tol,
-                    "rho": args.cp_rho},
-        verbose=args.verbose,
+        cp_options=cp_options,
+        # cutting-plane runs are long: always show iteration progress
+        verbose=args.verbose or args.method == "cutting-plane",
     )
     elapsed = time.time() - t0
 

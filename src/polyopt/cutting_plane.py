@@ -293,6 +293,7 @@ def solve_cutting_plane(
     tol: float = 1e-4,
     rho: float = 10.0,
     threads: int = 0,
+    checkpoint_path: str | None = None,
     verbose: bool = False,
 ) -> dict:
     """Level-bundle master/pessimization loop.
@@ -312,6 +313,25 @@ def solve_cutting_plane(
 
     kappa = 0.4
     t0 = time.perf_counter()
+
+    def checkpoint(it, LB, V, status):
+        """The checkpointed LB is a valid certified bound at every write."""
+        if checkpoint_path is None:
+            return
+        import json
+
+        with open(checkpoint_path, "w") as f:
+            json.dump({
+                "iter": it, "bound": LB, "upper_model": V,
+                "status": status, "valid": LB is not None,
+                "elapsed": time.perf_counter() - t0,
+            }, f, indent=2)
+
+    if verbose:
+        print(f"  cp setup: {len(data.matching.pairs)} pairs, "
+              f"{data.matching.n_constraints} matching equalities, "
+              f"{len(data.moments)} moments; running Slater/scenario-0 SDP",
+              flush=True)
     gamma, Z0 = feasibility_check_mosek(data.matching, return_Z=True)
     if Z0 is None or gamma <= 0:
         return {"status": f"slater_failed (gamma={gamma})", "bound": None}
@@ -332,8 +352,9 @@ def solve_cutting_plane(
     if Z_new is not None:
         scenarios.append(Z_new)
     history.append((LB, v))
+    checkpoint(0, LB, V, "running")
     if verbose:
-        print(f"  cp init: LB {LB:.6f}, pessimization {v:.6f}")
+        print(f"  cp init: LB {LB:.6f}, pessimization {v:.6f}", flush=True)
 
     for it in range(max_iters):
         if V - LB <= tol * max(1.0, abs(LB)):
@@ -349,9 +370,10 @@ def solve_cutting_plane(
             # the min-max (and hence min p) is at least `level`
             LB = level
             history.append((LB, None))
+            checkpoint(it + 1, LB, V, "running")
             if verbose:
                 print(f"  cp iter {it}: level {level:.6f} infeasible "
-                      f"-> LB {LB:.6f}")
+                      f"-> LB {LB:.6f}", flush=True)
             continue
         if step["M"] is None:
             # numerically undecided near the boundary: refresh LB with a
@@ -370,9 +392,10 @@ def solve_cutting_plane(
             M_hat = step["M"]
         v, Z_new = pessimize(data, M_hat, rho=rho, threads=threads)
         history.append((LB, v))
+        checkpoint(it + 1, LB, min(V, v), "running")
         if verbose:
             print(f"  cp iter {it}: LB {LB:.6f}, level {level:.6f}, "
-                  f"pessimization {v:.6f}")
+                  f"pessimization {v:.6f}", flush=True)
         if Z_new is None:
             status = "pessimization_failed"
             break
@@ -381,6 +404,7 @@ def solve_cutting_plane(
             center = M_hat      # serious step: recentre at the improver
         scenarios.append(Z_new)
     bound = LB
+    checkpoint(len(history), LB, V, status)
 
     result = {
         "status": status,

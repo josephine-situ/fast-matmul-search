@@ -37,6 +37,7 @@ conda activate fast-matmul-search
 export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK:-1}
 export OPENBLAS_NUM_THREADS=${SLURM_CPUS_PER_TASK:-1}
 export MKL_NUM_THREADS=${SLURM_CPUS_PER_TASK:-1}
+export PYTHONUNBUFFERED=1   # progress lines reach the log immediately
 
 python -c "import mosek; mosek.Env().checkoutlicense(mosek.feature.pton); print('MOSEK license OK')"
 

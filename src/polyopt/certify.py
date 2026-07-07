@@ -39,6 +39,44 @@ class CertifyResult:
         return self.upper_bound - self.bound
 
 
+def estimate_problem_size(
+    poly: SparsePolynomial,
+    n_vars: int,
+    pairs: list[MultiplierPair],
+    box: float = 1.0,
+    sym_box: bool = True,
+    top_lmi: bool = True,
+) -> dict:
+    """Build the matching + relaxation data WITHOUT solving and report
+    sizes, so cluster jobs can be dimensioned before submission."""
+    from polyopt.relaxation import build_relaxation
+    import time as _time
+
+    t0 = _time.perf_counter()
+    shifted = (poly.substitute_affine(box, 0.0) if sym_box
+               else poly.substitute_affine(2.0 * box, -box))
+    matching = build_matching(pairs, shifted, sym_box=sym_box)
+    t_match = _time.perf_counter() - t0
+    t0 = _time.perf_counter()
+    data = build_relaxation(matching, n_vars, top_lmi=top_lmi)
+    t_assemble = _time.perf_counter() - t0
+
+    supp_sizes = [len(t.supp) for t in pairs]
+    # dual method: per pair one (k+1)x(k+1) PSD block + one kxk dual-PSD
+    psd_scalars = sum(
+        (k + 1) * (k + 2) // 2 + k * (k + 1) // 2 for k in supp_sizes
+    )
+    return {
+        "n_pairs": len(pairs),
+        "max_supp": max(supp_sizes),
+        "n_lambda": matching.n_constraints,
+        "n_moments": len(data.moments),
+        "n_rlt_rows": int(data.rlt_rows.shape[0]),
+        "dual_psd_scalars": psd_scalars,
+        "build_seconds": round(t_match + t_assemble, 1),
+    }
+
+
 def certify_box_minimum(
     poly: SparsePolynomial,
     n_vars: int,
@@ -82,9 +120,15 @@ def certify_box_minimum(
     if pairs is None:
         pairs = full_family(n_vars, max(degree - 2, 0))
 
+    if verbose:
+        print(f"building coefficient matching for {len(pairs)} pairs...",
+              flush=True)
     t0 = time.perf_counter()
     matching = build_matching(pairs, shifted, sym_box=sym_box)
     times["matching"] = time.perf_counter() - t0
+    if verbose:
+        print(f"  {matching.n_constraints} matching equalities "
+              f"({times['matching']:.1f}s)", flush=True)
 
     use_mosek = solver.upper() == "MOSEK"
     gamma = None
@@ -111,9 +155,16 @@ def certify_box_minimum(
                 times=times,
             )
 
+    if verbose:
+        print("assembling relaxation data...", flush=True)
     t0 = time.perf_counter()
     data = build_relaxation(matching, n_vars, top_lmi=top_lmi)
     times["assemble"] = time.perf_counter() - t0
+    if verbose:
+        print(f"  {len(data.moments)} moments, "
+              f"{data.rlt_rows.shape[0]} RLT rows "
+              f"({times['assemble']:.1f}s); solving ({method})...",
+              flush=True)
 
     extra_ineq = None
     if extra_cuts:
