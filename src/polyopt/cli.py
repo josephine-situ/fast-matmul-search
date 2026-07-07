@@ -45,10 +45,11 @@ def main_certify(argv=None):
                     default="dual",
                     help="monolithic dual SDP or memory-light "
                          "adversarial loop (bound valid on early stop)")
-    ap.add_argument("--cp-max-iters", type=int, default=30)
+    ap.add_argument("--cp-max-iters", type=int, default=100)
     ap.add_argument("--cp-tol", type=float, default=1e-4)
-    ap.add_argument("--cp-rho", type=float, default=100.0,
-                    help="coefficient bound for pessimization scenarios")
+    ap.add_argument("--cp-rho", type=float, default=10.0,
+                    help="coefficient bound for pessimization scenarios "
+                         "(smaller = faster convergence, weaker limit)")
     ap.add_argument("--max-flips", type=int, default=None,
                     help="cap complement flips in the multiplier family "
                          "(default: all flips - needed for strong bounds)")

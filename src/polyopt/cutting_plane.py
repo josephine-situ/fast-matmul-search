@@ -289,9 +289,9 @@ def solve_cutting_plane(
     data: RelaxationData,
     top_lmi: bool = True,
     extra_ineq: tuple[sp.csr_matrix, np.ndarray] | None = None,
-    max_iters: int = 30,
+    max_iters: int = 100,
     tol: float = 1e-4,
-    rho: float = 100.0,
+    rho: float = 10.0,
     threads: int = 0,
     verbose: bool = False,
 ) -> dict:
@@ -302,6 +302,11 @@ def solve_cutting_plane(
     evaluated pessimization values is an upper bound on the min-max
     target, so the loop stops when V - LB <= tol. `bound`=LB is valid
     even on early stop. kappa in (0,1) sets the level between LB and V.
+
+    Budget note: on structured tensor losses V decays slowly (the
+    adversary exploits lift-inconsistency at magnitude ~rho), so expect
+    O(100) iterations; the dual method is preferable whenever it fits in
+    memory. rho trades achievable tightness against adversary power.
     """
     from polyopt.mosek_backend import feasibility_check_mosek
 
