@@ -41,8 +41,17 @@ def main_certify(argv=None):
     ap.add_argument("--box", type=float, default=1.0,
                     help="factor entries constrained to [-box, box]")
     ap.add_argument("--solver", default="MOSEK")
-    ap.add_argument("--max-flips", type=int, default=1,
-                    help="complement flips in the multiplier family")
+    ap.add_argument("--method", choices=["dual", "cutting-plane"],
+                    default="dual",
+                    help="monolithic dual SDP or memory-light "
+                         "adversarial loop (bound valid on early stop)")
+    ap.add_argument("--cp-max-iters", type=int, default=30)
+    ap.add_argument("--cp-tol", type=float, default=1e-4)
+    ap.add_argument("--cp-rho", type=float, default=100.0,
+                    help="coefficient bound for pessimization scenarios")
+    ap.add_argument("--max-flips", type=int, default=None,
+                    help="cap complement flips in the multiplier family "
+                         "(default: all flips - needed for strong bounds)")
     ap.add_argument("--no-slater", action="store_true",
                     help="skip the strict-feasibility check (not recommended)")
     ap.add_argument("--no-upper", action="store_true")
@@ -66,6 +75,9 @@ def main_certify(argv=None):
         solver=args.solver, sym_box=True,
         check_slater=not args.no_slater,
         compute_upper=not args.no_upper,
+        method=args.method,
+        cp_options={"max_iters": args.cp_max_iters, "tol": args.cp_tol,
+                    "rho": args.cp_rho},
         verbose=args.verbose,
     )
     elapsed = time.time() - t0
@@ -88,7 +100,8 @@ def main_certify(argv=None):
             "status": res.status, "slater_gamma": res.slater_gamma,
             "n_pairs": res.n_pairs, "n_lambda": res.n_lambda,
             "n_moments": res.n_moments, "times": res.times,
-            "solver": args.solver, "max_flips": args.max_flips,
+            "solver": args.solver, "method": args.method,
+            "max_flips": args.max_flips,
         }, indent=2))
         print(f"wrote {args.out}")
 

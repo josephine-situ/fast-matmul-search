@@ -26,13 +26,16 @@ def _fusion_sparse(mat: sp.spmatrix):
     )
 
 
-def feasibility_check_mosek(data, tol: float = 1e-8) -> float:
+def feasibility_check_mosek(data, tol: float = 1e-8, return_Z: bool = False):
     """Fusion version of slc_constraints.feasibility_check (Slater margin).
 
     Maximizes gamma s.t. the coefficient-matching equalities hold with
     P_t >= gamma*I; returns gamma (or -inf if infeasible). Much faster
-    than the cvxpy path on large families.
+    than the cvxpy path on large families. With return_Z=True returns
+    (gamma, [(P_t, r_t, w_t)]) - a strictly feasible decomposition usable
+    as the initial cutting-plane scenario.
     """
+    import numpy as np
     from mosek.fusion import Domain, Expr, Model, ObjectiveSense
     from mosek.fusion import SolutionStatus
 
@@ -40,11 +43,13 @@ def feasibility_check_mosek(data, tol: float = 1e-8) -> float:
     with Model("slc-feasibility") as model:
         gamma = model.variable(1, Domain.lessThan(1.0))
         exprs = []
+        P_vars, r_vars, w_vars = [], [], []
         for contrib in data.contribs:
             k = len(contrib.pair.supp)
             P = model.variable(Domain.inPSDCone(k))
             r = model.variable(k, Domain.unbounded())
             w = model.variable(1, Domain.unbounded())
+            P_vars.append(P), r_vars.append(r), w_vars.append(w)
             rows, cols, vals = [], [], []
             g_rows, g_vals = [], []
             for m_idx, a, b, sigma in contrib.P_entries:
@@ -77,8 +82,17 @@ def feasibility_check_mosek(data, tol: float = 1e-8) -> float:
         model.objective(ObjectiveSense.Maximize, gamma.index(0))
         model.solve()
         if model.getPrimalSolutionStatus() != SolutionStatus.Optimal:
-            return float("-inf")
-        return float(gamma.level()[0])
+            return (float("-inf"), None) if return_Z else float("-inf")
+        g = float(gamma.level()[0])
+        if not return_Z:
+            return g
+        Z = []
+        for contrib, P, r, w in zip(data.contribs, P_vars, r_vars, w_vars):
+            k = len(contrib.pair.supp)
+            # the matched quadratic is P_tilde + gamma*I
+            P_val = np.array(P.level()).reshape(k, k) + g * np.eye(k)
+            Z.append((P_val, np.array(r.level()), float(w.level()[0])))
+        return g, Z
 
 
 def solve_relaxation_mosek(

@@ -50,6 +50,8 @@ def certify_box_minimum(
     top_lmi: bool = True,
     sym_box: bool = False,
     extra_cuts: list | None = None,
+    method: str = "dual",
+    cp_options: dict | None = None,
     verbose: bool = False,
 ) -> CertifyResult:
     """Certified lower bound for min p(x) over x in [-box, box]^n.
@@ -60,6 +62,11 @@ def certify_box_minimum(
     multipliers (1+y_i), (1-y_j) - this preserves the polynomial's sign
     structure (no coefficient explosion from shifting), which matters for
     restricted families on structured polynomials.
+
+    method="dual" solves the monolithic dual SDP; method="cutting-plane"
+    runs the memory-light adversarial loop (MOSEK only; the bound is
+    valid even when stopped before convergence). cp_options are passed
+    to solve_cutting_plane (max_iters, tol, rho, threads).
     """
     times: dict[str, float] = {}
     t0 = time.perf_counter()
@@ -81,6 +88,8 @@ def certify_box_minimum(
 
     use_mosek = solver.upper() == "MOSEK"
     gamma = None
+    if method == "cutting-plane":
+        check_slater = False  # the cutting-plane loop checks it itself
     if check_slater:
         t0 = time.perf_counter()
         if use_mosek:
@@ -113,7 +122,16 @@ def certify_box_minimum(
         extra_ineq = cuts_to_rows(extra_cuts, data.moments)
 
     t0 = time.perf_counter()
-    if use_mosek:
+    if method == "cutting-plane":
+        if not use_mosek:
+            raise ValueError("cutting-plane mode requires solver='MOSEK'")
+        from polyopt.cutting_plane import solve_cutting_plane
+
+        sol = solve_cutting_plane(
+            data, top_lmi=top_lmi, extra_ineq=extra_ineq,
+            verbose=verbose, **(cp_options or {}),
+        )
+    elif use_mosek:
         from polyopt.mosek_backend import solve_relaxation_mosek
 
         sol = solve_relaxation_mosek(
@@ -125,6 +143,8 @@ def certify_box_minimum(
             extra_ineq=extra_ineq,
         )
     times["solve"] = time.perf_counter() - t0
+    if "n_moments" not in sol:
+        sol["n_moments"] = len(data.moments)
 
     upper = None
     x_box = None
@@ -145,7 +165,7 @@ def certify_box_minimum(
     return CertifyResult(
         bound=sol["bound"],
         status=sol["status"],
-        slater_gamma=gamma,
+        slater_gamma=sol.get("slater_gamma", gamma),
         upper_bound=upper,
         n_pairs=len(pairs),
         n_lambda=matching.n_constraints,

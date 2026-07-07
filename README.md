@@ -41,6 +41,38 @@ polyopt-bb --case 2,2,2 --rank 7          # branch & bound search
 Solvers: open-source Clarabel/SCS work out of the box (via cvxpy); MOSEK
 (`pip install .[mosek]` + academic license) is strongly recommended at scale.
 
+Two solve methods: `--method dual` builds the monolithic dual SDP (tightest,
+memory-hungry); `--method cutting-plane` alternates a moment-space master
+with an adversarial pessimization over decompositions (paper Remark 4) —
+far lighter in memory, and its bound is valid even when stopped before
+convergence.
+
+## Running on the SLURM cluster
+
+MOSEK is pip-installable (no module needed) and personal academic licenses
+are user-locked, not machine-locked, so your laptop license works on the
+cluster. One-time setup:
+
+```bash
+# on the cluster, inside the repo
+module load miniforge && conda activate fast-matmul-search
+pip install -e ".[mosek]"
+# copy your license (from %USERPROFILE%\mosek\mosek.lic on Windows):
+mkdir -p ~/mosek && scp <laptop>:mosek/mosek.lic ~/mosek/mosek.lic
+python -c "import mosek; mosek.Env().checkoutlicense(mosek.feature.pton); print('license OK')"
+```
+
+Then submit (flags pass through to `polyopt-certify`):
+
+```bash
+sbatch scripts/submit_polyopt.sbatch --case karatsuba --rank 2 --method cutting-plane
+sbatch scripts/submit_polyopt.sbatch --case 2,2,2 --rank 6 --method cutting-plane --cp-max-iters 100
+```
+
+Results land in `results/certificates/<jobid>.json`; logs in `logs/`.
+If no MOSEK license is available, `--solver CLARABEL --method dual` runs
+on open-source solvers (much slower, smaller cases only).
+
 ## Structure
 
 - `src/`: continuous-search modules (flat) and the `polyopt/` package
