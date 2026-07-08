@@ -102,6 +102,7 @@ def solve_relaxation_mosek(
     threads: int = 0,
     tol: float = 1e-9,
     extra_ineq: tuple[sp.csr_matrix, np.ndarray] | None = None,
+    solver_params: dict | None = None,
 ) -> dict:
     """Assemble and solve with MOSEK Fusion. Returns the same result dict
     shape as solve_relaxation_cvxpy, plus primal/dual objective values."""
@@ -120,6 +121,8 @@ def solve_relaxation_mosek(
         if threads:
             model.setSolverParam("numThreads", threads)
         model.setSolverParam("intpntCoTolRelGap", tol)
+        for key, val in (solver_params or {}).items():
+            model.setSolverParam(key, val)
 
         Mvar = model.variable("M", nM, Domain.unbounded())
         lam = model.variable("lam", L, Domain.unbounded())

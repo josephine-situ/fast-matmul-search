@@ -80,6 +80,11 @@ def main_certify(argv=None):
                     help="MOSEK thread cap (default: SLURM_CPUS_PER_TASK "
                          "if set, else all cores; MOSEK sees physical "
                          "cores, not the cgroup limit)")
+    ap.add_argument("--mosek-param", action="append", default=[],
+                    metavar="KEY=VALUE",
+                    help="extra MOSEK parameter for the dual solve, "
+                         "repeatable (e.g. intpntSolveForm=dual, "
+                         "presolveUse=off)")
     ap.add_argument("--verbose", action="store_true")
     ap.add_argument("--out", type=Path, default=None)
     args = ap.parse_args(argv)
@@ -140,6 +145,7 @@ def main_certify(argv=None):
         method=args.method,
         cp_options=cp_options,
         threads=args.threads,
+        solver_params=dict(p.split("=", 1) for p in args.mosek_param),
         # cutting-plane runs are long: always show iteration progress
         verbose=args.verbose or args.method == "cutting-plane",
     )

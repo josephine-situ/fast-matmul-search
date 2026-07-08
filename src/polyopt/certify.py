@@ -91,6 +91,7 @@ def certify_box_minimum(
     method: str = "dual",
     cp_options: dict | None = None,
     threads: int = 0,
+    solver_params: dict | None = None,
     verbose: bool = False,
 ) -> CertifyResult:
     """Certified lower bound for min p(x) over x in [-box, box]^n.
@@ -190,7 +191,7 @@ def certify_box_minimum(
 
         sol = solve_relaxation_mosek(
             data, top_lmi=top_lmi, verbose=verbose, extra_ineq=extra_ineq,
-            threads=threads,
+            threads=threads, solver_params=solver_params,
         )
     else:
         sol = solve_relaxation_cvxpy(
