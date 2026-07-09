@@ -219,6 +219,9 @@ def main_bb(argv=None):
                          "to run to gap closure")
     ap.add_argument("--max-nodes", type=int, default=200)
     ap.add_argument("--gap", type=float, default=1e-6)
+    ap.add_argument("--no-sym-fix", action="store_true",
+                    help="disable the free sign-gauge root restriction "
+                         "u_{r,0} >= 0, v_{r,0} >= 0")
     ap.add_argument("--solver", default="MOSEK")
     ap.add_argument("--threads", type=int,
                     default=int(os.environ.get("SLURM_CPUS_PER_TASK", 0)))
@@ -235,11 +238,21 @@ def main_bb(argv=None):
         args.out.parent.mkdir(parents=True, exist_ok=True)
         checkpoint = str(args.out.with_suffix(".progress.json"))
 
+    root_lo = None
+    if not args.no_sym_fix:
+        root_lo = -args.box * np.ones(var.n_vars)
+        for r in range(var.rank):
+            root_lo[var.u(r, 0)] = 0.0
+            root_lo[var.v(r, 0)] = 0.0
+        print(f"sign-gauge root: {2 * var.rank} coordinates fixed "
+              f"nonnegative (2^{2 * var.rank}x orbit reduction)", flush=True)
+
     t0 = time.time()
     res = branch_and_bound(
         poly, n_vars=var.n_vars, box=args.box, target=target,
         gap_tol=args.gap, max_nodes=args.max_nodes, solver=args.solver,
-        threads=args.threads, checkpoint_path=checkpoint, verbose=True,
+        threads=args.threads, root_lo=root_lo,
+        checkpoint_path=checkpoint, verbose=True,
     )
     elapsed = time.time() - t0
 

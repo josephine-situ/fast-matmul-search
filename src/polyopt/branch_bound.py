@@ -85,6 +85,8 @@ def branch_and_bound(
     check_slater: bool = True,
     threads: int = 0,
     ub_starts: int = 12,
+    root_lo: np.ndarray | None = None,
+    root_hi: np.ndarray | None = None,
     checkpoint_path: str | None = None,
     verbose: bool = False,
 ) -> dict:
@@ -92,6 +94,11 @@ def branch_and_bound(
 
     Stops when UB - LB <= gap_tol, when LB > target (nonachievability
     certified), or at max_nodes; the returned LB is valid in all cases.
+
+    root_lo/root_hi override the root box, e.g. to gauge-fix sign
+    symmetries (restricting u_{r,0}, v_{r,0} >= 0 is valid for tensor
+    losses because double sign flips preserve the loss, so some global
+    minimizer lies in that orthant).
     """
     t0 = time.perf_counter()
     rng_seed = itertools.count()
@@ -115,8 +122,9 @@ def branch_and_bound(
                 best_val, best_x = float(r.fun), r.x
         return best_val, best_x
 
-    lo0 = -box * np.ones(n_vars)
-    hi0 = box * np.ones(n_vars)
+    lo0 = root_lo if root_lo is not None else -box * np.ones(n_vars)
+    hi0 = root_hi if root_hi is not None else box * np.ones(n_vars)
+    lo0, hi0 = np.asarray(lo0, float), np.asarray(hi0, float)
 
     UB, x_best = node_ub_direct(lo0, hi0)
     lb0, x0, xdiag0 = _certify_node(
