@@ -31,6 +31,7 @@ class CertifyResult:
     n_moments: int
     times: dict = field(default_factory=dict)
     x_box: np.ndarray | None = None   # relaxation first moment, original coords
+    X_diag: np.ndarray | None = None  # second-moment diagonal (scaled coords)
 
     @property
     def gap(self) -> float | None:
@@ -228,4 +229,5 @@ def certify_box_minimum(
         n_moments=sol["n_moments"],
         times=times,
         x_box=x_box,
+        X_diag=(np.diag(sol["X"]) if "X" in sol else None),
     )

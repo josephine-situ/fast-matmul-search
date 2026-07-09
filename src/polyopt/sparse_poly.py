@@ -150,6 +150,26 @@ class SparsePolynomial:
                     q.add_term(tuple(sub), coeff)
         return q
 
+    def substitute_affine_per_var(self, a, b) -> "SparsePolynomial":
+        """Return q(y) = p(a*y + b) with per-variable coefficients:
+        x_i = a[i]*y_i + b[i]. Used by branch & bound to map an arbitrary
+        node box prod [lo_i, hi_i] onto [-1,1]^n."""
+        q = SparsePolynomial()
+        for m, c in self.coeffs.items():
+            counts = Counter(m)
+            variables = sorted(counts)
+            ranges = [range(counts[v] + 1) for v in variables]
+            for choice in itertools.product(*ranges):
+                coeff = c
+                sub = []
+                for v, j in zip(variables, choice):
+                    k = counts[v]
+                    coeff *= math.comb(k, j) * (a[v] ** j) * (b[v] ** (k - j))
+                    sub.extend([v] * j)
+                if coeff != 0.0:
+                    q.add_term(tuple(sub), coeff)
+        return q
+
     # ------------------------------------------------------------- utilities
 
     def support_closure(self) -> set[Monomial]:

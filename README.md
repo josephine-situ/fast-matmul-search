@@ -34,8 +34,10 @@ Certified bounds:
 
 ```bash
 polyopt-validate --stage deg3             # validation ladder (deg3/deg4/deg6/...)
-polyopt-certify --case 2,2,2 --rank 6 --box 1.0   # headline nonachievability run
-polyopt-bb --case 2,2,2 --rank 7          # branch & bound search
+polyopt-certify --case karatsuba --rank 2 # root certificate attempt
+polyopt-bb --case karatsuba --rank 2 --max-nodes 500   # spatial branch & bound
+                                          # (--target 0.0 stops at nonachievability;
+                                          #  <out>.progress.json updates per node)
 ```
 
 Solvers: open-source Clarabel/SCS work out of the box (via cvxpy); MOSEK

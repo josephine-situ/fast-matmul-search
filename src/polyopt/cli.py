@@ -205,7 +205,55 @@ def main_validate(argv=None):
 
 
 def main_bb(argv=None):
-    raise SystemExit(
-        "polyopt-bb: branch & bound is not implemented yet "
-        "(see src/polyopt/branch_bound.py roadmap)"
+    from polyopt.branch_bound import branch_and_bound
+
+    ap = argparse.ArgumentParser(
+        description="Spatial branch & bound with certified node bounds"
     )
+    ap.add_argument("--case", required=True)
+    ap.add_argument("--rank", type=int, required=True)
+    ap.add_argument("--box", type=float, default=1.0)
+    ap.add_argument("--target", type=float, default=0.0,
+                    help="stop as soon as the global LB exceeds this "
+                         "(0.0 = nonachievability certificate); pass nan "
+                         "to run to gap closure")
+    ap.add_argument("--max-nodes", type=int, default=200)
+    ap.add_argument("--gap", type=float, default=1e-6)
+    ap.add_argument("--solver", default="MOSEK")
+    ap.add_argument("--threads", type=int,
+                    default=int(os.environ.get("SLURM_CPUS_PER_TASK", 0)))
+    ap.add_argument("--out", type=Path, default=None)
+    args = ap.parse_args(argv)
+
+    poly, var, name = _build_case(args.case, args.rank)
+    print(f"case {name}: {var.n_vars} variables, "
+          f"{len(poly)} monomials, degree {poly.degree}", flush=True)
+
+    target = None if np.isnan(args.target) else args.target
+    checkpoint = None
+    if args.out:
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        checkpoint = str(args.out.with_suffix(".progress.json"))
+
+    t0 = time.time()
+    res = branch_and_bound(
+        poly, n_vars=var.n_vars, box=args.box, target=target,
+        gap_tol=args.gap, max_nodes=args.max_nodes, solver=args.solver,
+        threads=args.threads, checkpoint_path=checkpoint, verbose=True,
+    )
+    elapsed = time.time() - t0
+
+    print(f"status: {res['status']}")
+    print(f"certified LB: {res['lb']}   best UB: {res['ub']}")
+    print(f"nodes: {res['nodes_solved']} solved, {res['open_nodes']} open"
+          f"   elapsed {elapsed:.1f}s")
+    if res["lb"] is not None and target is not None and res["lb"] > target:
+        print(f"==> no rank-{args.rank} decomposition with entries in "
+              f"[-{args.box}, {args.box}] exists (loss >= {res['lb']:.6g})")
+
+    if args.out:
+        out = {k: v for k, v in res.items() if k not in ("x_best",)}
+        out["history"] = [[float(a), float(b)] for a, b in out["history"]]
+        out.update({"case": name, "rank": args.rank, "box": args.box})
+        args.out.write_text(json.dumps(out, indent=2))
+        print(f"wrote {args.out}")
