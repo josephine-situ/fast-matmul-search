@@ -170,6 +170,29 @@ class SparsePolynomial:
                     q.add_term(tuple(sub), coeff)
         return q
 
+    def substitute_values(self, values: dict[int, float]) -> "SparsePolynomial":
+        """Fix a subset of variables to constants; the result is a
+        polynomial in the remaining variables (ids unchanged)."""
+        q = SparsePolynomial()
+        for m, c in self.coeffs.items():
+            coeff = c
+            rest = []
+            for v in m:
+                if v in values:
+                    coeff *= values[v]
+                else:
+                    rest.append(v)
+            if coeff != 0.0:
+                q.add_term(tuple(rest), coeff)
+        return q
+
+    def rename_vars(self, mapping: dict[int, int]) -> "SparsePolynomial":
+        """Relabel variable ids (e.g. compact to 0..m-1 after fixing)."""
+        q = SparsePolynomial()
+        for m, c in self.coeffs.items():
+            q.add_term(tuple(sorted(mapping[v] for v in m)), c)
+        return q
+
     # ------------------------------------------------------------- utilities
 
     def support_closure(self) -> set[Monomial]:

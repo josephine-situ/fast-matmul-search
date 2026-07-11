@@ -4,8 +4,5 @@ __pycache__/
 venv/
 .env
 .ipynb_checkpoints/
-results/*
-!results/.gitkeep
-!results/summary.json
 *.egg-info/
 quick_results/
