@@ -1,0 +1,12 @@
+{
+  "case": "polymult<2,2> rank 2",
+  "rank": 2,
+  "dry_run": true,
+  "n_pairs": 5731,
+  "max_supp": 14,
+  "n_lambda": 23996,
+  "n_moments": 4931,
+  "n_rlt_rows": 93022,
+  "dual_psd_scalars": 1289475,
+  "build_seconds": 18.6
+}

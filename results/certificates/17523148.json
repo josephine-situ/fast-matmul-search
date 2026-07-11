@@ -1,0 +1,25 @@
+{
+  "case": "polymult<2,2> rank 2",
+  "rank": 2,
+  "box": 1.0,
+  "bound": -13.71171308658597,
+  "upper_bound": 1.0000000000024625,
+  "status": "SolutionStatus.Optimal",
+  "slater_gamma": 0.9999999999999999,
+  "n_pairs": 5731,
+  "n_lambda": 23996,
+  "n_moments": 4931,
+  "times": {
+    "shift": 0.001597230089828372,
+    "matching": 3.430370181100443,
+    "slater": 253.95104120485485,
+    "assemble": 13.837798735126853,
+    "solve": 345.7086076850537,
+    "upper": 0.2208157330751419
+  },
+  "solver": "MOSEK",
+  "method": "dual",
+  "family": "support",
+  "supp": "full",
+  "max_flips": null
+}

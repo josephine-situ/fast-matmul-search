@@ -1,0 +1,12 @@
+{
+  "case": "<2,2,1> rank 3",
+  "rank": 3,
+  "dry_run": true,
+  "n_pairs": 18709,
+  "max_supp": 24,
+  "n_lambda": 27693,
+  "n_moments": 7116,
+  "n_rlt_rows": 117396,
+  "dual_psd_scalars": 1099981,
+  "build_seconds": 23.5
+}
